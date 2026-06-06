@@ -1,0 +1,1300 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>躲避球 Dodgeball</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body {
+    min-height: 100%;
+    background: #1a1a1a;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+    color: #eee;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    padding: 16px 0;
+  }
+  h1 {
+    font-size: 18px;
+    font-weight: 500;
+    margin-bottom: 12px;
+    color: #aaa;
+    letter-spacing: 1px;
+  }
+  canvas {
+    background: #f5f5f5;
+    border-radius: 8px;
+    box-shadow: 0 8px 24px rgba(0,0,0,0.4);
+    cursor: crosshair;
+    display: block;
+  }
+</style>
+</head>
+<body>
+  <h1>躲避球 · Dodgeball</h1>
+  <canvas id="game" width="800" height="500"></canvas>
+<script>
+(() => {
+  'use strict';
+
+  // ---------- Constants ----------
+  const WIDTH = 800;
+  const HEIGHT = 500;
+  const CHAR_SIZE = 30;
+  const CHAR_SPEED = 4;
+  const BALL_RADIUS = 6;             // smaller projectile
+  const PLAYER_BALL_SPEED = 5;
+  const AI_BALL_SPEED = 4.8;
+  const PLAYER_THROW_COOLDOWN = 15;     // frames
+  const AI_THROW_INTERVAL_MIN = 45;     // a bit longer since there are 2 AIs
+  const AI_THROW_INTERVAL_MAX = 80;
+  const BALL_MAX_BOUNCES = 4;
+  const MAX_HP = 10;
+  const AI_THREAT_RANGE = 200;          // px, when AI starts evading
+  const HINT_FRAMES = 300;              // ~5s at 60fps
+  const OBSTACLE_RADIUS = 18;
+  const OBSTACLE_MIN_COUNT = 3;
+  const OBSTACLE_MAX_COUNT = 5;
+  const HISTORY_LEN = 6;                // frames of player-history for velocity
+
+  // AI improvement constants
+  const PERP_DODGE_WEIGHT = 1.0;        // strength of perpendicular dodge
+  const SPEED_THREAT_WEIGHT = 2.0;      // how much ball speed multiplies threat
+  const AI_STATE_HP_RETREAT = 1;        // HP ≤ this triggers RETREAT state
+  const AI_STATE_THREAT_DEFENSIVE = 1.5;// threat score threshold for DEFENSIVE
+  const AGGRESSIVE_IDEAL_DIST = 90;     // preferred distance when aggressive
+  const DEFENSIVE_IDEAL_DIST = 180;     // preferred distance when defensive
+  const RETREAT_GOAL_X_PLAYER = 50;     // retreat x for player team
+  const RETREAT_GOAL_X_AI = 750;        // retreat x for AI team
+  const TEAM_SPREAD_MIN = 100;          // minimum px between teammates
+  const TEAM_SPREAD_FORCE = 0.4;        // repulsion strength
+  const ENEMY_VERTICAL_SPLIT = 120;     // how far enemies keep from center y
+  const JITTER_MIN = 2;                 // minimum aim jitter (very accurate)
+  const JITTER_MAX = 12;                // maximum aim jitter (very inaccurate)
+  const JITTER_ADAPT_THRESHOLD = 0.6;   // hit rate below this = increase jitter
+
+  const COLOR_P1 = '#4A90E2';           // blue
+  const COLOR_P2 = '#3DC1B5';           // teal
+  const COLOR_AI1 = '#E24A4A';          // red
+  const COLOR_AI2 = '#E89B3D';          // orange
+  const COLOR_HP_GREEN = '#5cd65c';
+  const COLOR_HP_YELLOW = '#f0c040';
+  const COLOR_HP_RED = '#e05050';
+  const COLOR_BG = '#f5f5f5';
+  const COLOR_GRID = '#e2e2e2';
+  const COLOR_TEXT = '#333';
+  const COLOR_HINT = '#999';
+  const COLOR_OBSTACLE = '#6B5B4F';
+  const COLOR_OBSTACLE_HI = 'rgba(255,255,255,0.25)';
+
+  // ---------- Canvas setup ----------
+  const canvas = document.getElementById('game');
+  const ctx = canvas.getContext('2d');
+
+  // ---------- Game state ----------
+  const state = {
+    gameState: 'ready',     // 'ready' | 'playing' | 'gameover'
+    winner: null,           // 'player' | 'ai'
+    hintTimer: HINT_FRAMES,
+    restartBtn: null,       // {x, y, w, h} computed in render
+    startBtn: null,         // start button bounds in 'ready' state
+    ballSpeedMultiplier: 1.0, // 0.5x to 2.0x
+    speedDownBtn: null,     // slow button bounds
+    speedUpBtn: null,       // fast button bounds
+    effects: [],            // hit effects (ring + particles)
+  };
+
+  function createCharacter(x, y, color, team, role) {
+    // role: 'p1' | 'p2' | 'ai1' | 'ai2'
+    return {
+      x, y,
+      size: CHAR_SIZE,
+      speed: CHAR_SPEED,
+      hp: MAX_HP,
+      maxHp: MAX_HP,
+      color,
+      team,                // 'player' | 'ai'
+      role,                // for identification in HUD/AI
+      throwCooldown: 0,
+      facingAngle: team === 'player' ? 0 : Math.PI,
+      // AI-specific
+      aiState: 'AGGRESSIVE',        // 'AGGRESSIVE' | 'DEFENSIVE' | 'RETREAT'
+      aiHoldTimer: 60,              // frames before first throw
+      aiWanderAngle: Math.random() * Math.PI * 2,
+      aiWanderTimer: 0,
+      targetIndex: 0,               // for rotating target selection
+      targetHitRates: {},           // { role: { hits, total } } for aim adaptation
+      dyingTimer: 0,               // 0 = alive, >0 = death animation frames remaining
+      deathParticles: [],          // particles for death animation
+    };
+  }
+
+  function createBall(x, y, vx, vy, owner) {
+    return {
+      x, y, vx, vy,
+      radius: BALL_RADIUS,
+      owner,               // character reference
+      ownerTeam: owner.team,
+      // Use a brighter, more vivid shade than the character body so balls
+      // stand out visually and don't blend into the character that threw them.
+      color: owner.team === 'player' ? '#1f6fcc' : '#ff1f1f',
+      bouncesLeft: BALL_MAX_BOUNCES,
+      trail: [],           // last few positions for visual trail
+    };
+  }
+
+  let teamPlayer = [], teamAI = [], balls, obstacles;
+
+  function generateObstacles() {
+    const count = OBSTACLE_MIN_COUNT +
+      Math.floor(Math.random() * (OBSTACLE_MAX_COUNT - OBSTACLE_MIN_COUNT + 1));
+    const margin = 30; // leave minimum space from edge
+    const minFromSpawn = 130;
+    const result = [];
+    let attempts = 0;
+    const maxAttempts = 400;
+    const shapes = ['circle', 'ellipse', 'rect', 'diamond', 'pentagon']; // available shapes
+    const colors = ['#6B5B4F', '#5a4f42', '#7d6e60', '#8c7d6f', '#4a3f35', '#7a6a5a', '#6a5a4a'];
+    while (result.length < count && attempts < maxAttempts) {
+      attempts++;
+      const size = 10 + Math.random() * 18; // 10-28 radius equivalent
+      const x = margin + size + Math.random() * (WIDTH - 2 * (margin + size));
+      const y = margin + size + Math.random() * (HEIGHT - 2 * (margin + size));
+
+      // Keep clear of all 4 spawn points
+      const spawns = [
+        { x: 110, y: 180 },
+        { x: 110, y: 320 },
+        { x: 690, y: 180 },
+        { x: 690, y: 320 },
+      ];
+      let tooCloseToSpawn = false;
+      for (const s of spawns) {
+        if (Math.hypot(x - s.x, y - s.y) < minFromSpawn + size - 10) {
+          tooCloseToSpawn = true; break;
+        }
+      }
+      if (tooCloseToSpawn) continue;
+      // Keep clear of other obstacles
+      let tooClose = false;
+      for (const o of result) {
+        const oSize = o.size || o.radius;
+        if (Math.hypot(x - o.x, y - o.y) < oSize + size + 10) { tooClose = true; break; }
+      }
+      if (tooClose) continue;
+      // Generate random obstacle properties
+      result.push({
+        x, y,
+        size, // equivalent radius for bounding
+        shape: shapes[Math.floor(Math.random() * shapes.length)],
+        color: colors[Math.floor(Math.random() * colors.length)],
+        rotation: Math.random() * Math.PI * 2, // random rotation for some shapes
+        width: size * (0.6 + Math.random() * 1.0), // for rect/ellipse
+        height: size * (0.6 + Math.random() * 1.0),
+      });
+    }
+    return result;
+  }
+
+  function resetGame() {
+    // 2v2 layout: 1 human player + 1 AI ally (left) vs 2 AI enemies (right)
+    teamPlayer = [
+      createCharacter(110, 180, COLOR_P1, 'player', 'p1'),
+      createCharacter(110, 320, COLOR_P2, 'player', 'ally'),  // AI ally
+    ];
+    teamAI = [
+      createCharacter(690, 180, COLOR_AI1, 'ai', 'ai1'),
+      createCharacter(690, 320, COLOR_AI2, 'ai', 'ai2'),
+    ];
+    balls = [];
+    obstacles = generateObstacles();
+    state.effects = [];
+    p1History.length = 0;
+    p2History.length = 0;
+    state.gameState = 'ready';
+    state.winner = null;
+    state.hintTimer = HINT_FRAMES;
+  }
+
+  function startGame() {
+    state.gameState = 'playing';
+    state.hintTimer = HINT_FRAMES;
+  }
+
+  // ---------- Input ----------
+  const keys = {};
+  const mouse = { x: WIDTH / 2, y: HEIGHT / 2, isDown: false };
+
+  window.addEventListener('keydown', (e) => {
+    keys[e.code] = true;
+    // Prevent arrow keys from scrolling
+    if (['ArrowUp','ArrowDown','ArrowLeft','ArrowRight','Space'].includes(e.code)) {
+      e.preventDefault();
+    }
+    // Any key starts the game from 'ready' state
+    if (state.gameState === 'ready') {
+      startGame();
+    }
+  });
+  window.addEventListener('keyup', (e) => {
+    keys[e.code] = false;
+  });
+
+  function getCanvasMousePos(evt) {
+    const rect = canvas.getBoundingClientRect();
+    return {
+      x: (evt.clientX - rect.left) * (WIDTH / rect.width),
+      y: (evt.clientY - rect.top) * (HEIGHT / rect.height),
+    };
+  }
+
+  canvas.addEventListener('mousemove', (e) => {
+    const p = getCanvasMousePos(e);
+    mouse.x = p.x;
+    mouse.y = p.y;
+  });
+  canvas.addEventListener('mousedown', (e) => {
+    const p = getCanvasMousePos(e);
+    mouse.x = p.x;
+    mouse.y = p.y;
+    mouse.isDown = true;
+
+    // Speed control buttons first
+    if (state.speedDownBtn && p.x >= state.speedDownBtn.x && p.x <= state.speedDownBtn.x + state.speedDownBtn.w &&
+        p.y >= state.speedDownBtn.y && p.y <= state.speedDownBtn.y + state.speedDownBtn.h) {
+      state.ballSpeedMultiplier = Math.max(0.3, state.ballSpeedMultiplier - 0.25);
+      return;
+    }
+    if (state.speedUpBtn && p.x >= state.speedUpBtn.x && p.x <= state.speedUpBtn.x + state.speedUpBtn.w &&
+        p.y >= state.speedUpBtn.y && p.y <= state.speedUpBtn.y + state.speedUpBtn.h) {
+      state.ballSpeedMultiplier = Math.min(3.0, state.ballSpeedMultiplier + 0.25);
+      return;
+    }
+
+    if (state.gameState === 'ready') {
+      startGame();
+    } else if (state.gameState === 'playing') {
+      // P1 throws toward mouse cursor (if P1 is alive)
+      const p1 = teamPlayer[0];
+      if (p1 && p1.hp > 0) tryThrowToward(p1, mouse.x, mouse.y);
+    } else if (state.gameState === 'gameover' && state.restartBtn) {
+      const b = state.restartBtn;
+      if (p.x >= b.x && p.x <= b.x + b.w && p.y >= b.y && p.y <= b.y + b.h) {
+        resetGame();
+      }
+    }
+  });
+  canvas.addEventListener('mouseup', () => { mouse.isDown = false; });
+  canvas.addEventListener('mouseleave', () => { mouse.isDown = false; });
+
+  // ---------- Throwing ----------
+  function tryThrowToward(thrower, tx, ty) {
+    if (thrower.throwCooldown > 0) return;
+    const dx = tx - thrower.x;
+    const dy = ty - thrower.y;
+    const dist = Math.hypot(dx, dy);
+    if (dist < 1) return;
+    const ndx = dx / dist;
+    const ndy = dy / dist;
+    const speed = thrower.team === 'player' ? PLAYER_BALL_SPEED : AI_BALL_SPEED;
+    // Spawn ball a bit further out so it doesn't immediately overlap characters
+    const spawnDist = thrower.size / 2 + BALL_RADIUS + 4;
+    const bx = thrower.x + ndx * spawnDist;
+    const by = thrower.y + ndy * spawnDist;
+    balls.push(createBall(bx, by, ndx * speed * state.ballSpeedMultiplier, ndy * speed * state.ballSpeedMultiplier, thrower));
+    thrower.throwCooldown = PLAYER_THROW_COOLDOWN;
+    thrower.facingAngle = Math.atan2(ndy, ndx);
+  }
+
+  function nearestEnemy(character) {
+    const enemies = character.team === 'player' ? teamAI : teamPlayer;
+    let best = null, bestD = Infinity;
+    for (const e of enemies) {
+      if (e.hp <= 0 || e.dyingTimer > 0) continue;
+      const d = Math.hypot(e.x - character.x, e.y - character.y);
+      if (d < bestD) { bestD = d; best = e; }
+    }
+    return best;
+  }
+
+  // Each AI has a target index that rotates after each throw, ensuring
+  // the AI distributes attacks across ALL enemies rather than just focusing
+  // on the nearest one (which felt like the AI was "ignoring" the player).
+  function pickTarget(ai) {
+    const enemies = ai.team === 'player' ? teamAI : teamPlayer;
+    const alive = enemies.filter(e => e.hp > 0 && e.dyingTimer <= 0);
+    if (alive.length === 0) return null;
+    if (alive.length === 1) return alive[0];
+    // Rotate: pick the one at index targetIndex (mod alive count)
+    if (ai.targetIndex == null) ai.targetIndex = 0;
+    const target = alive[ai.targetIndex % alive.length];
+    ai.targetIndex = (ai.targetIndex + 1) % alive.length;
+    return target;
+  }
+
+  // Position history for each player (used by AI for lead-targeting)
+  const p1History = [];
+  const p2History = [];
+
+  function trackHistory(history, c) {
+    history.push({ x: c.x, y: c.y });
+    if (history.length > HISTORY_LEN) history.shift();
+  }
+
+  function estimateVelocity(history) {
+    if (history.length < 2) return { vx: 0, vy: 0 };
+    const first = history[0];
+    const last = history[history.length - 1];
+    const dt = history.length - 1;
+    return { vx: (last.x - first.x) / dt, vy: (last.y - first.y) / dt };
+  }
+
+  // ---------- Collision helpers ----------
+  // Push a circle (center + radius) out of all obstacles so it doesn't overlap them.
+  // Applies iterative resolution for corner cases.
+  function resolveCircleVsObstacles(cx, cy, cr) {
+    for (let iter = 0; iter < 3; iter++) {
+      let moved = false;
+      for (const o of obstacles) {
+        const or = o.size || o.radius; // use size for new or radius for old
+        let minD, dist;
+        let dx = cx - o.x, dy = cy - o.y;
+        if (o.shape === 'rect' || o.shape === 'diamond' || o.shape === 'pentagon') {
+          // AABB approx for all non-circle/ellipse
+          const ow = o.width || or, oh = o.height || or;
+          // Find closest point on AABB
+          const closestX = Math.max(o.x - ow/2, Math.min(cx, o.x + ow/2));
+          const closestY = Math.max(o.y - oh/2, Math.min(cy, o.y + oh/2));
+          dx = cx - closestX;
+          dy = cy - closestY;
+          dist = Math.hypot(dx, dy);
+          minD = cr;
+        } else if (o.shape === 'ellipse') {
+          // Approx ellipse collision using average radius
+          const avgRad = ((o.width || or) + (o.height || or)) / 2;
+          dist = Math.hypot(dx, dy);
+          minD = cr + avgRad;
+        } else { // circle (default)
+          dist = Math.hypot(dx, dy);
+          minD = cr + or;
+        }
+        if (dist < minD && dist > 0.001) {
+          const push = (minD - dist);
+          cx += (dx / dist) * push;
+          cy += (dy / dist) * push;
+          moved = true;
+        } else if (dist <= 0.001) {
+          // Centered exactly on obstacle — nudge upward
+          cy -= minD;
+          moved = true;
+        }
+      }
+      if (!moved) break;
+    }
+    return { x: cx, y: cy };
+  }
+
+  // ---------- Player movement ----------
+  // Apply movement from named keys to a character, handle obstacle collisions,
+  // update facing toward movement direction, and decrement throwCooldown.
+  function updatePlayerCharacter(c, keyUp, keyDown, keyLeft, keyRight) {
+    let dx = 0, dy = 0;
+    if (keys[keyUp]) dy -= 1;
+    if (keys[keyDown]) dy += 1;
+    if (keys[keyLeft]) dx -= 1;
+    if (keys[keyRight]) dx += 1;
+
+    if (dx !== 0 && dy !== 0) {
+      const inv = 1 / Math.SQRT2;
+      dx *= inv;
+      dy *= inv;
+    }
+
+    c.x += dx * c.speed;
+    c.y += dy * c.speed;
+
+    // Update facing toward movement direction (used as throw aim for P2)
+    if (Math.abs(dx) > 0.01 || Math.abs(dy) > 0.01) {
+      c.facingAngle = Math.atan2(dy, dx);
+    }
+
+    // Clamp to canvas
+    const half = c.size / 2;
+    if (c.x < half) c.x = half;
+    if (c.x > WIDTH - half) c.x = WIDTH - half;
+    if (c.y < half) c.y = half;
+    if (c.y > HEIGHT - half) c.y = HEIGHT - half;
+
+    // Resolve obstacle collisions
+    const resolved = resolveCircleVsObstacles(c.x, c.y, c.size / 2);
+    c.x = resolved.x;
+    c.y = resolved.y;
+    if (c.x < half) c.x = half;
+    if (c.x > WIDTH - half) c.x = WIDTH - half;
+    if (c.y < half) c.y = half;
+    if (c.y > HEIGHT - half) c.y = HEIGHT - half;
+
+    if (c.throwCooldown > 0) c.throwCooldown--;
+  }
+
+  function updateP1() {
+    const p1 = teamPlayer[0];
+    if (!p1 || p1.hp <= 0 || p1.dyingTimer > 0) return;
+    trackHistory(p1History, p1);
+    updatePlayerCharacter(p1, 'KeyW', 'KeyS', 'KeyA', 'KeyD');
+    // Mouse aim overrides movement-facing
+    const aimDx = mouse.x - p1.x;
+    const aimDy = mouse.y - p1.y;
+    if (Math.hypot(aimDx, aimDy) > 1) {
+      p1.facingAngle = Math.atan2(aimDy, aimDx);
+    }
+  }
+
+  function updateAlly() {
+    // Player's AI teammate — uses the same dodge/throw logic as enemies
+    // but on the player's team.
+    const ally = teamPlayer[1];
+    if (!ally) return;
+    if (ally.dyingTimer > 0) return;
+    trackHistory(p2History, ally);
+    updateAIChar(ally);
+  }
+
+  // ---------- AI logic (per-AI) ----------
+
+  function estimatePlayerVelocity() {
+    // Average of P1 and ally velocities
+    const v1 = estimateVelocity(p1History);
+    const v2 = estimateVelocity(p2History);
+    return { vx: (v1.vx + v2.vx) * 0.5, vy: (v1.vy + v2.vy) * 0.5 };
+  }
+
+  function updateAIChar(ai) {
+    if (ai.hp <= 0 || ai.dyingTimer > 0) return;
+    const pVel = estimatePlayerVelocity();
+
+    // 1) Threat assessment: consider all opposing-team balls
+    let avoidX = 0, avoidY = 0;
+    let threatScore = 0;
+
+    const PREDICT_FRAMES = 24;
+    const DANGER_RADIUS = 70;
+
+    for (const b of balls) {
+      if (b.ownerTeam === ai.team) continue;       // friendly ball — ignore
+      if (b.owner && (b.owner.hp <= 0 || b.owner.dyingTimer > 0)) continue;    // skip balls from dead/dying owners
+      const dx = b.x - ai.x;
+      const dy = b.y - ai.y;
+      const d = Math.hypot(dx, dy);
+      if (d > AI_THREAT_RANGE) continue;
+      const vlen = Math.hypot(b.vx, b.vy);
+      if (vlen < 0.01) continue;
+
+      // Speed factor: faster balls are more threatening
+      const speedFactor = Math.min(3.0, vlen / AI_BALL_SPEED);
+
+      const fx = b.x + b.vx * PREDICT_FRAMES;
+      const fy = b.y + b.vy * PREDICT_FRAMES;
+      const fdx = fx - ai.x;
+      const fdy = fy - ai.y;
+      const fDist = Math.hypot(fdx, fdy);
+
+      const dot = (b.vx * dx + b.vy * dy) / (vlen * d);
+      const inLineOfFire = dot > 0;
+      const willBeClose = fDist < DANGER_RADIUS;
+      if (!inLineOfFire && !willBeClose) continue;
+
+      // Perpendicular dodge: side-step relative to ball's velocity
+      const bvx = b.vx / vlen;
+      const bvy = b.vy / vlen;
+      const perpX = -bvy;            // rotate velocity 90 degrees
+      const perpY = bvx;
+
+      // Which side of the trajectory are we on? Dodge TO the open side
+      const sideDot = perpX * dx + perpY * dy;
+      const sign = sideDot > 0 ? -1 : 1;
+
+      // Distance weight (with epsilon to avoid division by tiny values)
+      const w = d > 0 ? 1 / (d + 20) : 1;
+
+      avoidX += perpX * sign * w * PERP_DODGE_WEIGHT * speedFactor;
+      avoidY += perpY * sign * w * PERP_DODGE_WEIGHT * speedFactor;
+
+      // Urgency for threat score
+      const urgency = (DANGER_RADIUS - Math.min(fDist, DANGER_RADIUS)) / DANGER_RADIUS;
+      threatScore += (0.5 + urgency) * speedFactor;
+    }
+
+    const aLen = Math.hypot(avoidX, avoidY);
+    if (aLen > 0) {
+      avoidX /= aLen;
+      avoidY /= aLen;
+    }
+
+    // 1b) Update AI state based on HP and threat
+    if (ai.hp <= AI_STATE_HP_RETREAT) {
+      ai.aiState = 'RETREAT';
+    } else if (threatScore >= AI_STATE_THREAT_DEFENSIVE) {
+      ai.aiState = 'DEFENSIVE';
+    } else {
+      ai.aiState = 'AGGRESSIVE';
+    }
+
+    // 2) Center bias — only used to keep AI from getting stuck against walls
+    const margin = 60;
+    let centerX = 0, centerY = 0;
+    if (ai.x < margin) centerX = (margin - ai.x) / margin;
+    if (ai.x > WIDTH - margin) centerX = -(ai.x - (WIDTH - margin)) / margin;
+    if (ai.y < margin) centerY = (margin - ai.y) / margin;
+    if (ai.y > HEIGHT - margin) centerY = -(ai.y - (HEIGHT - margin)) / margin;
+
+    // 3) Movement
+    let mx = 0, my = 0;
+    const dodgeGain = (ai.aiState === 'RETREAT') ? 1.6
+                    : (ai.aiState === 'DEFENSIVE') ? 1.3
+                    : 1.0;
+    if (threatScore > 0.1) {
+      // Active dodging: prioritize avoidance (intensity varies by state)
+      const t = Math.min(1, threatScore * dodgeGain);
+      mx = avoidX * t + centerX * 0.3;
+      my = avoidY * t + centerY * 0.3;
+    } else {
+      // State-based movement
+      const target = nearestEnemy(ai);
+      if (ai.aiState === 'RETREAT') {
+        // Flee toward own back line
+        const goalX = ai.team === 'player' ? RETREAT_GOAL_X_PLAYER : RETREAT_GOAL_X_AI;
+        const goalY = HEIGHT / 2;
+        const rdx = goalX - ai.x;
+        const rdy = goalY - ai.y;
+        const rd = Math.hypot(rdx, rdy) || 1;
+        mx = (rdx / rd) * 0.7 + centerX * 0.3;
+        my = (rdy / rd) * 0.7 + centerY * 0.3;
+      } else if (target) {
+        const tdx = target.x - ai.x;
+        const tdy = target.y - ai.y;
+        const td = Math.hypot(tdx, tdy) || 1;
+        const ideal = ai.aiState === 'AGGRESSIVE' ? AGGRESSIVE_IDEAL_DIST : DEFENSIVE_IDEAL_DIST;
+        const diff = td - ideal;
+        const strength = Math.min(0.6, Math.abs(diff) / 200);
+        const dir = diff > 0 ? 1 : -1;
+        mx = (tdx / td) * dir * strength + centerX * 0.3;
+        my = (tdy / td) * dir * strength + centerY * 0.3;
+      } else {
+        // No enemies left, just wander
+        ai.wanderTimer--;
+        if (ai.wanderTimer <= 0) {
+          ai.aiWanderAngle = Math.random() * Math.PI * 2;
+          ai.wanderTimer = 40 + Math.floor(Math.random() * 50);
+        }
+        mx = Math.cos(ai.aiWanderAngle) * 0.25 + centerX * 0.3;
+        my = Math.sin(ai.aiWanderAngle) * 0.25 + centerY * 0.3;
+      }
+    }
+
+    // 3b) Team spread forces
+    const mates = ai.team === 'player' ? teamPlayer : teamAI;
+    for (const mate of mates) {
+      if (mate === ai || mate.hp <= 0 || mate.dyingTimer > 0) continue;
+      const mdx = ai.x - mate.x;
+      const mdy = ai.y - mate.y;
+      const md = Math.hypot(mdx, mdy);
+      if (md < TEAM_SPREAD_MIN && md > 0.01) {
+        const force = (TEAM_SPREAD_MIN - md) / TEAM_SPREAD_MIN * TEAM_SPREAD_FORCE;
+        mx += (mdx / md) * force;
+        my += (mdy / md) * force;
+      }
+    }
+    // Enemy vertical split: AI1 favors upper, AI2 favors lower
+    if (ai.team === 'ai') {
+      const cY = HEIGHT / 2;
+      const pushDir = ai.role === 'ai1' ? -1 : 1;
+      if (Math.abs(ai.y - cY) < ENEMY_VERTICAL_SPLIT * 0.5) {
+        my += pushDir * 0.15;
+      }
+    }
+
+    ai.x += mx * ai.speed;
+    ai.y += my * ai.speed;
+
+    const half = ai.size / 2;
+    if (ai.x < half) ai.x = half;
+    if (ai.x > WIDTH - half) ai.x = WIDTH - half;
+    if (ai.y < half) ai.y = half;
+    if (ai.y > HEIGHT - half) ai.y = HEIGHT - half;
+
+    const aResolved = resolveCircleVsObstacles(ai.x, ai.y, ai.size / 2);
+    ai.x = aResolved.x;
+    ai.y = aResolved.y;
+    if (ai.x < half) ai.x = half;
+    if (ai.x > WIDTH - half) ai.x = WIDTH - half;
+    if (ai.y < half) ai.y = half;
+    if (ai.y > HEIGHT - half) ai.y = HEIGHT - half;
+
+    // 4) Throw: opportunity-based with jitter adaptation
+    if (ai.throwCooldown > 0) ai.throwCooldown--;
+    ai.aiHoldTimer++;
+
+    const target = pickTarget(ai);
+    if (target) {
+      const MIN_HOLD = ai.aiState === 'AGGRESSIVE' ? 25
+                     : ai.aiState === 'RETREAT' ? 60
+                     : 40;
+      const MAX_HOLD = ai.aiState === 'AGGRESSIVE' ? 70
+                     : ai.aiState === 'RETREAT' ? 150
+                     : 100;
+
+      if (ai.aiHoldTimer >= MIN_HOLD) {
+        const tdx = target.x - ai.x;
+        const tdy = target.y - ai.y;
+        const td = Math.hypot(tdx, tdy) || 1;
+        const tVel = target === teamPlayer[0] ? estimateVelocity(p1History)
+                   : target === teamPlayer[1] ? estimateVelocity(p2History)
+                   : { vx: 0, vy: 0 };
+        const closingSpeed = -(tVel.vx * tdx + tVel.vy * tdy) / td;
+        const closingFactor = Math.max(0, Math.min(1, closingSpeed / AI_BALL_SPEED));
+        const distFactor = 1 - Math.min(1, td / 500);
+        let opportunity = distFactor * 0.3 + closingFactor * 0.5;
+        if (target.hp <= 1) opportunity += 0.2;
+
+        const threshold = ai.aiState === 'RETREAT' ? 0.7
+                        : ai.aiState === 'AGGRESSIVE' ? 0.3
+                        : 0.5;
+        const forcedThrow = ai.aiHoldTimer >= MAX_HOLD;
+
+        if (opportunity >= threshold || forcedThrow) {
+          ai.aiHoldTimer = 0;
+          if (td < 40) return;
+          const travelFrames = td / AI_BALL_SPEED;
+          const leadX = target.x + tVel.vx * travelFrames;
+          const leadY = target.y + tVel.vy * travelFrames;
+
+          // Adaptive jitter based on hit rate
+          const stats = ai.targetHitRates[target.role];
+          const hitRate = (stats && stats.total >= 3) ? stats.hits / stats.total : 0.5;
+          const jitterRange = JITTER_MIN + (1 - hitRate) * (JITTER_MAX - JITTER_MIN);
+          const jitterX = (Math.random() - 0.5) * jitterRange;
+          const jitterY = (Math.random() - 0.5) * jitterRange;
+
+          tryThrowToward(ai, leadX + jitterX, leadY + jitterY);
+
+          // Record throw attempt
+          if (!ai.targetHitRates[target.role]) ai.targetHitRates[target.role] = { hits: 0, total: 0 };
+          ai.targetHitRates[target.role].total++;
+        }
+      }
+    }
+  }
+
+  // ---------- Ball physics ----------
+  function updateBalls() {
+    for (let i = balls.length - 1; i >= 0; i--) {
+      const b = balls[i];
+      // Record trail (last 10 positions) for a longer, more visible streak
+      b.trail.push({ x: b.x, y: b.y });
+      if (b.trail.length > 10) b.trail.shift();
+      b.x += b.vx;
+      b.y += b.vy;
+
+      // Wall bounce
+      if (b.x - b.radius < 0) {
+        b.x = b.radius;
+        b.vx = -b.vx;
+        b.bouncesLeft--;
+      } else if (b.x + b.radius > WIDTH) {
+        b.x = WIDTH - b.radius;
+        b.vx = -b.vx;
+        b.bouncesLeft--;
+      }
+      if (b.y - b.radius < 0) {
+        b.y = b.radius;
+        b.vy = -b.vy;
+        b.bouncesLeft--;
+      } else if (b.y + b.radius > HEIGHT) {
+        b.y = HEIGHT - b.radius;
+        b.vy = -b.vy;
+        b.bouncesLeft--;
+      }
+
+      // Obstacle bounce
+      for (const o of obstacles) {
+        const or = o.size || o.radius;
+        let minD, dist, dx = b.x - o.x, dy = b.y - o.y;
+        let closestX = o.x, closestY = o.y;
+        if (o.shape === 'rect' || o.shape === 'diamond' || o.shape === 'pentagon') {
+          // AABB approx
+          const ow = o.width || or, oh = o.height || or;
+          closestX = Math.max(o.x - ow/2, Math.min(b.x, o.x + ow/2));
+          closestY = Math.max(o.y - oh/2, Math.min(b.y, o.y + oh/2));
+          dx = b.x - closestX;
+          dy = b.y - closestY;
+          dist = Math.hypot(dx, dy);
+          minD = b.radius;
+        } else if (o.shape === 'ellipse') {
+          const avgRad = ((o.width || or) + (o.height || or)) / 2;
+          dist = Math.hypot(dx, dy);
+          minD = b.radius + avgRad;
+        } else {
+          dist = Math.hypot(dx, dy);
+          minD = b.radius + or;
+        }
+        if (dist < minD) {
+          // Push ball out of obstacle
+          if (dist > 0.001) {
+            const overlap = minD - dist;
+            b.x += (dx / dist) * overlap;
+            b.y += (dy / dist) * overlap;
+            // Reflect velocity
+            const nx = dx / dist;
+            const ny = dy / dist;
+            const dot2 = 2 * (b.vx * nx + b.vy * ny);
+            b.vx -= dot2 * nx;
+            b.vy -= dot2 * ny;
+          } else {
+            b.vy = -b.vy;
+          }
+          b.bouncesLeft--;
+          break; // one obstacle collision per frame
+        }
+      }
+
+      // Out of bounces or way off-screen → remove
+      if (b.bouncesLeft <= 0 ||
+          b.x < -50 || b.x > WIDTH + 50 ||
+          b.y < -50 || b.y > HEIGHT + 50) {
+        balls.splice(i, 1);
+      }
+    }
+  }
+
+  // ---------- Collision (circle vs AABB) ----------
+  function circleHitsCharacter(b, c) {
+    const half = c.size / 2;
+    const closestX = Math.max(c.x - half, Math.min(b.x, c.x + half));
+    const closestY = Math.max(c.y - half, Math.min(b.y, c.y + half));
+    const dx = b.x - closestX;
+    const dy = b.y - closestY;
+    return (dx * dx + dy * dy) <= b.radius * b.radius;
+  }
+
+  function allDead(team) {
+    return team.every(c => c.hp <= 0 && c.dyingTimer <= 0);
+  }
+
+  function checkCollisions() {
+    for (let i = balls.length - 1; i >= 0; i--) {
+      const b = balls[i];
+      // Determine which team the ball can damage (opposite of owner's team)
+      const targetTeam = b.ownerTeam === 'player' ? teamAI : teamPlayer;
+      for (const target of targetTeam) {
+        if (target.hp <= 0 || target.dyingTimer > 0) continue;
+        if (circleHitsCharacter(b, target)) {
+          target.hp = Math.max(0, target.hp - 1);
+          // Hit effect — flash ring + particle burst
+          spawnHitEffect(target.x, target.y, target.color);
+          // Record successful hit for thrower's adaptive jitter
+          if (b.owner && b.owner.targetHitRates && b.owner.targetHitRates[target.role]) {
+            b.owner.targetHitRates[target.role].hits++;
+          }
+          balls.splice(i, 1);
+          // Death animation
+          if (target.hp <= 0 && target.dyingTimer === 0) {
+            target.dyingTimer = 30; // 30-frame death animation
+            // Generate particles
+            for (let p = 0; p < 12; p++) {
+              const angle = Math.random() * Math.PI * 2;
+              const spd = 1 + Math.random() * 3;
+              target.deathParticles.push({
+                x: 0, y: 0, // relative to character
+                vx: Math.cos(angle) * spd,
+                vy: Math.sin(angle) * spd,
+                life: 30,
+                size: 2 + Math.random() * 3,
+                color: '#' + Math.floor(Math.random()*16777215).toString(16).padStart(6,'0'),
+              });
+            }
+          } else {
+            // Check win/loss after each hit (skip if dying)
+            if (allDead(teamAI)) { endGame('player'); return; }
+            if (allDead(teamPlayer)) { endGame('ai'); return; }
+          }
+          break; // ball consumed
+        }
+      }
+    }
+  }
+
+  function endGame(winner) {
+    state.gameState = 'gameover';
+    state.winner = winner;
+  }
+
+  // ---------- Hit effects ----------
+  function spawnHitEffect(x, y, color) {
+    const PARTICLE_COUNT = 16;
+    const particles = [];
+    for (let i = 0; i < PARTICLE_COUNT; i++) {
+      const angle = Math.random() * Math.PI * 2;
+      const speed = 2 + Math.random() * 4;
+      const isHighlight = i < 4; // first 4 are white highlights
+      particles.push({
+        x: x,
+        y: y,
+        vx: Math.cos(angle) * speed,
+        vy: Math.sin(angle) * speed,
+        size: 2 + Math.random() * 3,
+        life: 20 + Math.random() * 10,
+        maxLife: 20 + Math.random() * 10,
+        color: isHighlight ? '#fff' : color,
+      });
+    }
+    state.effects.push({
+      x, y,
+      color,
+      ringRadius: 0,
+      ringAlpha: 0.6,
+      ringMaxRadius: 120,
+      particles,
+      age: 0,
+      maxAge: 30,
+    });
+  }
+
+  function updateEffects() {
+    for (let i = state.effects.length - 1; i >= 0; i--) {
+      const e = state.effects[i];
+      e.age++;
+      // Ring: expand and fade
+      const ringProgress = e.age / 15; // ring lasts 15 frames
+      e.ringRadius = e.ringMaxRadius * Math.min(1, ringProgress);
+      e.ringAlpha = 0.6 * Math.max(0, 1 - ringProgress);
+      // Particles: move, gravity, fade
+      for (const p of e.particles) {
+        p.x += p.vx;
+        p.y += p.vy;
+        p.vy += 0.1; // slight gravity
+        p.vx *= 0.97; // drag
+        p.vy *= 0.97;
+        p.life--;
+      }
+      // Remove dead effects
+      if (e.age >= e.maxAge) {
+        state.effects.splice(i, 1);
+      }
+    }
+  }
+
+  function drawEffects() {
+    for (const e of state.effects) {
+      // Expanding ring
+      if (e.ringAlpha > 0.01) {
+        ctx.save();
+        ctx.globalAlpha = e.ringAlpha;
+        ctx.strokeStyle = '#fff';
+        ctx.lineWidth = 4;
+        ctx.beginPath();
+        ctx.arc(e.x, e.y, e.ringRadius, 0, Math.PI * 2);
+        ctx.stroke();
+        // Inner fill for flash
+        ctx.globalAlpha = e.ringAlpha * 0.3;
+        ctx.fillStyle = '#fff';
+        ctx.beginPath();
+        ctx.arc(e.x, e.y, e.ringRadius * 0.6, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.restore();
+      }
+      // Particles
+      for (const p of e.particles) {
+        if (p.life <= 0) continue;
+        const alpha = p.life / p.maxLife;
+        ctx.save();
+        ctx.globalAlpha = alpha;
+        ctx.fillStyle = p.color;
+        ctx.beginPath();
+        ctx.arc(p.x, p.y, p.size * alpha, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.restore();
+      }
+    }
+  }
+
+  // ---------- Update ----------
+  function update() {
+    if (state.hintTimer > 0) state.hintTimer--;
+
+    if (state.gameState === 'playing') {
+      updateP1();
+      updateAlly();
+      for (const ai of teamAI) updateAIChar(ai);
+      updateBalls();
+      checkCollisions();
+      updateEffects();
+      // Update death animations for all characters
+      for (const c of [...teamPlayer, ...teamAI]) {
+        if (c.dyingTimer > 0) {
+          c.dyingTimer--;
+          for (const p of c.deathParticles) {
+            p.x += p.vx;
+            p.y += p.vy;
+            p.life--;
+          }
+          // Check win/loss after death animation completes
+          if (c.dyingTimer <= 0) {
+            if (allDead(teamAI)) { endGame('player'); return; }
+            if (allDead(teamPlayer)) { endGame('ai'); return; }
+          }
+        }
+      }
+    }
+  }
+
+  // ---------- Render ----------
+  function drawGrid() {
+    ctx.strokeStyle = COLOR_GRID;
+    ctx.lineWidth = 1;
+    const step = 40;
+    ctx.beginPath();
+    for (let x = step; x < WIDTH; x += step) {
+      ctx.moveTo(x + 0.5, 0);
+      ctx.lineTo(x + 0.5, HEIGHT);
+    }
+    for (let y = step; y < HEIGHT; y += step) {
+      ctx.moveTo(0, y + 0.5);
+      ctx.lineTo(WIDTH, y + 0.5);
+    }
+    ctx.stroke();
+  }
+
+  function drawHpBar(c) {
+    const w = 36;
+    const h = 6;
+    const x = c.x - w / 2;
+    const y = c.y - c.size / 2 - 14;
+    // Background
+    ctx.fillStyle = '#222';
+    ctx.fillRect(x - 1, y - 1, w + 2, h + 2);
+    ctx.fillStyle = '#444';
+    ctx.fillRect(x, y, w, h);
+    // Fill
+    const ratio = c.hp / c.maxHp;
+    let color = COLOR_HP_GREEN;
+    if (ratio <= 0.34) color = COLOR_HP_RED;
+    else if (ratio <= 0.67) color = COLOR_HP_YELLOW;
+    ctx.fillStyle = color;
+    ctx.fillRect(x, y, w * ratio, h);
+  }
+
+  function drawCharacter(c) {
+    // Don't draw dead characters after death animation completes
+    if (c.hp <= 0 && c.dyingTimer <= 0) return;
+
+    // Death animation
+    if (c.dyingTimer > 0) {
+      const alpha = c.dyingTimer / 30;
+      // Shrinking body
+      const scale = c.dyingTimer / 30;
+      const sc = c.size * scale;
+      ctx.save();
+      ctx.globalAlpha = alpha;
+      ctx.fillStyle = c.color;
+      roundRect(ctx, c.x - sc/2, c.y - sc/2, sc, sc, 8 * scale);
+      ctx.fill();
+      // Eyes (X shape for death)
+      ctx.strokeStyle = '#000';
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.moveTo(c.x - sc*0.3, c.y - sc*0.3);
+      ctx.lineTo(c.x + sc*0.3, c.y + sc*0.3);
+      ctx.moveTo(c.x + sc*0.3, c.y - sc*0.3);
+      ctx.lineTo(c.x - sc*0.3, c.y + sc*0.3);
+      ctx.stroke();
+      ctx.restore();
+      // Draw particles
+      for (const p of c.deathParticles) {
+        if (p.life <= 0) continue;
+        ctx.save();
+        ctx.globalAlpha = p.life / 30;
+        ctx.fillStyle = p.color;
+        ctx.beginPath();
+        ctx.arc(c.x + p.x, c.y + p.y, p.size * (p.life / 30), 0, Math.PI * 2);
+        ctx.fill();
+        ctx.restore();
+      }
+      return;
+    }
+
+    // Shadow
+    ctx.fillStyle = 'rgba(0,0,0,0.12)';
+    ctx.beginPath();
+    ctx.ellipse(c.x, c.y + c.size / 2 + 2, c.size * 0.45, 4, 0, 0, Math.PI * 2);
+    ctx.fill();
+
+    // Body
+    const r = 8;
+    ctx.fillStyle = c.color;
+    roundRect(ctx, c.x - c.size / 2, c.y - c.size / 2, c.size, c.size, r);
+    ctx.fill();
+
+    // Eyes — slightly offset toward facingAngle
+    const eyeOffsetX = Math.cos(c.facingAngle) * 3;
+    const eyeOffsetY = Math.sin(c.facingAngle) * 3;
+    const eyeR = 3;
+    const eyeY = c.y - 3;
+    const eyeDx = 6;
+    ctx.fillStyle = '#fff';
+    ctx.beginPath();
+    ctx.arc(c.x - eyeDx / 2 + eyeOffsetX * 0.5, eyeY + eyeOffsetY * 0.5, eyeR, 0, Math.PI * 2);
+    ctx.arc(c.x + eyeDx / 2 + eyeOffsetX * 0.5, eyeY + eyeOffsetY * 0.5, eyeR, 0, Math.PI * 2);
+    ctx.fill();
+    // Pupils
+    ctx.fillStyle = '#222';
+    ctx.beginPath();
+    ctx.arc(c.x - eyeDx / 2 + eyeOffsetX, eyeY + eyeOffsetY, eyeR * 0.55, 0, Math.PI * 2);
+    ctx.arc(c.x + eyeDx / 2 + eyeOffsetX, eyeY + eyeOffsetY, eyeR * 0.55, 0, Math.PI * 2);
+    ctx.fill();
+
+    // HP bar
+    drawHpBar(c);
+  }
+
+  function roundRect(ctx, x, y, w, h, r) {
+    ctx.beginPath();
+    ctx.moveTo(x + r, y);
+    ctx.lineTo(x + w - r, y);
+    ctx.quadraticCurveTo(x + w, y, x + w, y + r);
+    ctx.lineTo(x + w, y + h - r);
+    ctx.quadraticCurveTo(x + w, y + h, x + w - r, y + h);
+    ctx.lineTo(x + r, y + h);
+    ctx.quadraticCurveTo(x, y + h, x, y + h - r);
+    ctx.lineTo(x, y + r);
+    ctx.quadraticCurveTo(x, y, x + r, y);
+    ctx.closePath();
+  }
+
+  function drawBalls() {
+    for (const b of balls) {
+      // Draw trail (older = more transparent, smaller) — long trail for visibility
+      if (b.trail && b.trail.length > 1) {
+        for (let i = 0; i < b.trail.length; i++) {
+          const t = b.trail[i];
+          const ratio = (i + 1) / b.trail.length;
+          const alpha = ratio * 0.6;
+          const radius = b.radius * (0.5 + 0.5 * ratio);
+          ctx.fillStyle = b.color;
+          ctx.globalAlpha = alpha;
+          ctx.beginPath();
+          ctx.arc(t.x, t.y, radius, 0, Math.PI * 2);
+          ctx.fill();
+        }
+        ctx.globalAlpha = 1;
+      }
+      // Outer glow ring (makes the ball pop visually)
+      ctx.fillStyle = b.color;
+      ctx.globalAlpha = 0.25;
+      ctx.beginPath();
+      ctx.arc(b.x, b.y, b.radius * 1.6, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.globalAlpha = 1;
+      // Main ball body
+      ctx.fillStyle = b.color;
+      ctx.beginPath();
+      ctx.arc(b.x, b.y, b.radius, 0, Math.PI * 2);
+      ctx.fill();
+      // Dark outline for contrast against light background
+      ctx.strokeStyle = 'rgba(0,0,0,0.5)';
+      ctx.lineWidth = 2;
+      ctx.stroke();
+      // Bright highlight
+      ctx.fillStyle = 'rgba(255,255,255,0.85)';
+      ctx.beginPath();
+      ctx.arc(b.x - 4, b.y - 4, b.radius * 0.4, 0, Math.PI * 2);
+      ctx.fill();
+    }
+  }
+
+  function drawObstacles() {
+    for (const o of obstacles) {
+      const or = o.size || o.radius;
+      const color = o.color || COLOR_OBSTACLE;
+      const shadowY = or + 3;
+      const shadowXScale = or * 0.85;
+
+      // Shadow
+      ctx.fillStyle = 'rgba(0,0,0,0.15)';
+      ctx.beginPath();
+      ctx.ellipse(o.x, o.y + shadowY, shadowXScale, 3.5, 0, 0, Math.PI * 2);
+      ctx.fill();
+
+      ctx.save();
+      ctx.translate(o.x, o.y);
+      ctx.rotate(o.rotation || 0);
+
+      // Body
+      ctx.fillStyle = color;
+      ctx.beginPath();
+      if (o.shape === 'ellipse') {
+        const ow = o.width || or, oh = o.height || or;
+        ctx.ellipse(0, 0, ow/2, oh/2, 0, 0, Math.PI * 2);
+      } else if (o.shape === 'rect') {
+        const ow = o.width || or, oh = o.height || or;
+        ctx.rect(-ow/2, -oh/2, ow, oh);
+      } else if (o.shape === 'diamond') {
+        const ow = o.width || or, oh = o.height || or;
+        ctx.moveTo(0, -oh/2);
+        ctx.lineTo(ow/2, 0);
+        ctx.lineTo(0, oh/2);
+        ctx.lineTo(-ow/2, 0);
+        ctx.closePath();
+      } else if (o.shape === 'pentagon') {
+        for (let i = 0; i < 5; i++) {
+          const angle = (i * 2 * Math.PI / 5) - Math.PI / 2;
+          const x = Math.cos(angle) * or * 0.95;
+          const y = Math.sin(angle) * or * 0.95;
+          if (i === 0) ctx.moveTo(x, y);
+          else ctx.lineTo(x, y);
+        }
+        ctx.closePath();
+      } else { // circle (default)
+        ctx.arc(0, 0, or, 0, Math.PI * 2);
+      }
+      ctx.fill();
+
+      // Border
+      ctx.strokeStyle = '#4a3d33';
+      ctx.lineWidth = 1.5;
+      ctx.stroke();
+
+      // Highlight (top-left)
+      ctx.fillStyle = 'rgba(255,255,255,0.25)';
+      ctx.beginPath();
+      ctx.arc(-or/4, -or/4, or * 0.35, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.restore();
+    }
+  }
+
+  function drawHint() {
+    if (state.hintTimer <= 0) return;
+    const alpha = Math.min(1, state.hintTimer / 60);
+    ctx.fillStyle = `rgba(153, 153, 153, ${alpha})`;
+    ctx.font = '14px -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'top';
+    ctx.fillText('WASD 移动   ·   鼠标点击 投球', WIDTH / 2, 8);
+  }
+
+  function drawGameOver() {
+    // Overlay
+    ctx.fillStyle = 'rgba(0,0,0,0.55)';
+    ctx.fillRect(0, 0, WIDTH, HEIGHT);
+
+    // Text
+    ctx.fillStyle = '#fff';
+    ctx.font = 'bold 48px -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    const msg = state.winner === 'player' ? '你赢了!' : '你输了';
+    ctx.fillText(msg, WIDTH / 2, HEIGHT / 2 - 30);
+
+    // Restart button
+    const bw = 160, bh = 44;
+    const bx = WIDTH / 2 - bw / 2;
+    const by = HEIGHT / 2 + 20;
+    state.restartBtn = { x: bx, y: by, w: bw, h: bh };
+    ctx.fillStyle = COLOR_P1;
+    roundRect(ctx, bx, by, bw, bh, 8);
+    ctx.fill();
+    ctx.fillStyle = '#fff';
+    ctx.font = 'bold 18px -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif';
+    ctx.textBaseline = 'middle';
+    ctx.fillText('再来一局', WIDTH / 2, by + bh / 2);
+  }
+
+  function drawStartScreen() {
+    // Overlay
+    ctx.fillStyle = 'rgba(245,245,245,0.85)';
+    ctx.fillRect(0, 0, WIDTH, HEIGHT);
+
+    // Title
+    ctx.fillStyle = COLOR_TEXT;
+    ctx.font = 'bold 36px -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText('躲避球', WIDTH / 2, HEIGHT / 2 - 80);
+
+    // Instructions
+    ctx.font = '16px -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif';
+    ctx.fillStyle = '#555';
+    ctx.fillText('WASD 移动 · 鼠标点击 投球', WIDTH / 2, HEIGHT / 2 - 30);
+    ctx.fillText('2v2 模式: 你 (蓝) + AI 队友 (青) vs 2 个敌方 AI (红/橙)', WIDTH / 2, HEIGHT / 2 - 5);
+
+    // Start button
+    const bw = 180, bh = 48;
+    const bx = WIDTH / 2 - bw / 2;
+    const by = HEIGHT / 2 + 30;
+    state.startBtn = { x: bx, y: by, w: bw, h: bh };
+    ctx.fillStyle = COLOR_P1;
+    roundRect(ctx, bx, by, bw, bh, 8);
+    ctx.fill();
+    ctx.fillStyle = '#fff';
+    ctx.font = 'bold 20px -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif';
+    ctx.textBaseline = 'middle';
+    ctx.fillText('点击开始', WIDTH / 2, by + bh / 2);
+  }
+
+  function render() {
+    // Clear
+    ctx.fillStyle = COLOR_BG;
+    ctx.fillRect(0, 0, WIDTH, HEIGHT);
+    drawGrid();
+
+    // World
+    drawObstacles();
+    for (const c of teamPlayer) drawCharacter(c);
+    for (const c of teamAI) drawCharacter(c);
+    drawBalls();
+    drawEffects();
+
+    // UI: speed control
+    const btnW = 40, btnH = 32, gap = 8, btnY = 12, btnStartX = WIDTH - 200;
+    const spdLabelX = btnStartX + 2*btnW + gap*2 + 30;
+    const btn1X = btnStartX, btn2X = btnStartX + btnW + gap;
+    state.speedDownBtn = {x: btn1X, y: btnY, w: btnW, h: btnH};
+    state.speedUpBtn = {x: btn2X, y: btnY, w: btnW, h: btnH};
+    ctx.fillStyle = '#4a5568';
+    roundRect(ctx, state.speedDownBtn.x, state.speedDownBtn.y, state.speedDownBtn.w, state.speedDownBtn.h, 6);
+    ctx.fill();
+    roundRect(ctx, state.speedUpBtn.x, state.speedUpBtn.y, state.speedUpBtn.w, state.speedUpBtn.h, 6);
+    ctx.fill();
+    ctx.fillStyle = '#fff';
+    ctx.font = 'bold 22px -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif';
+    ctx.textBaseline = 'middle';
+    ctx.textAlign = 'center';
+    ctx.fillText('-', state.speedDownBtn.x + state.speedDownBtn.w/2, state.speedDownBtn.y + state.speedDownBtn.h/2);
+    ctx.fillText('+', state.speedUpBtn.x + state.speedUpBtn.w/2, state.speedUpBtn.y + state.speedUpBtn.h/2);
+    ctx.fillStyle = '#333';
+    ctx.font = 'bold 14px -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif';
+    ctx.textAlign = 'left';
+    ctx.fillText('球速: ' + (state.ballSpeedMultiplier * 100) + '%', spdLabelX, state.speedDownBtn.y + state.speedDownBtn.h/2);
+
+    drawHint();
+    if (state.gameState === 'ready') drawStartScreen();
+    else if (state.gameState === 'gameover') drawGameOver();
+  }
+
+  // ---------- Main loop ----------
+  function loop() {
+    update();
+    render();
+    requestAnimationFrame(loop);
+  }
+
+  // ---------- Boot ----------
+  resetGame();
+  loop();
+})();
+</script>
+</body>
+</html>

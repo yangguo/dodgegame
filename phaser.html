@@ -1,0 +1,1360 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>躲避球 Dodgeball (Phaser 3)</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body {
+    min-height: 100%;
+    background: #1a1a1a;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+    color: #eee;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    padding: 16px 0;
+  }
+  h1 {
+    font-size: 18px;
+    font-weight: 500;
+    margin-bottom: 12px;
+    color: #aaa;
+    letter-spacing: 1px;
+  }
+</style>
+</head>
+<body>
+  <h1>躲避球 · Dodgeball (Phaser)</h1>
+<script src="https://cdn.jsdelivr.net/npm/phaser@3.80.1/dist/phaser.min.js"></script>
+<script>
+(() => {
+  'use strict';
+
+  // ---------- Constants ----------
+  const WIDTH = 800;
+  const HEIGHT = 500;
+  const CHAR_SIZE = 30;
+  const CHAR_SPEED = 4;
+  const BALL_RADIUS = 6;
+  const PLAYER_BALL_SPEED = 5;
+  const AI_BALL_SPEED = 4.8;
+  const PLAYER_THROW_COOLDOWN = 15;
+  const AI_THROW_INTERVAL_MIN = 45;
+  const AI_THROW_INTERVAL_MAX = 80;
+  const BALL_MAX_BOUNCES = 4;
+  const MAX_HP = 10;
+  const AI_THREAT_RANGE = 200;
+  const HINT_FRAMES = 300;
+  const OBSTACLE_MIN_COUNT = 3;
+  const OBSTACLE_MAX_COUNT = 5;
+  const HISTORY_LEN = 6;
+
+  const PERP_DODGE_WEIGHT = 1.0;
+  const AI_STATE_HP_RETREAT = 1;
+  const AI_STATE_THREAT_DEFENSIVE = 1.5;
+  const AGGRESSIVE_IDEAL_DIST = 90;
+  const DEFENSIVE_IDEAL_DIST = 180;
+  const RETREAT_GOAL_X_PLAYER = 50;
+  const RETREAT_GOAL_X_AI = 750;
+  const TEAM_SPREAD_MIN = 100;
+  const TEAM_SPREAD_FORCE = 0.4;
+  const ENEMY_VERTICAL_SPLIT = 120;
+  const JITTER_MIN = 2;
+  const JITTER_MAX = 12;
+
+  const COLOR_P1 = 0x4A90E2;
+  const COLOR_P2 = 0x3DC1B5;
+  const COLOR_AI1 = 0xE24A4A;
+  const COLOR_AI2 = 0xE89B3D;
+  const COLOR_P1_STR = '#4A90E2';
+  const COLOR_P2_STR = '#3DC1B5';
+  const COLOR_AI1_STR = '#E24A4A';
+  const COLOR_AI2_STR = '#E89B3D';
+  const COLOR_HP_GREEN = '#5cd65c';
+  const COLOR_HP_YELLOW = '#f0c040';
+  const COLOR_HP_RED = '#e05050';
+  const COLOR_BG = '#f5f5f5';
+  const COLOR_GRID = '#e2e2e2';
+  const COLOR_TEXT = '#333';
+
+  const BALL_COLOR_PLAYER = 0x1f6fcc;
+  const BALL_COLOR_AI = 0xff1f1f;
+  const BALL_COLOR_PLAYER_STR = '#1f6fcc';
+  const BALL_COLOR_AI_STR = '#ff1f1f';
+
+  const OBSTACLE_COLORS = ['#6B5B4F', '#5a4f42', '#7d6e60', '#8c7d6f', '#4a3f35', '#7a6a5a', '#6a5a4a'];
+  const SHAPES = ['circle', 'ellipse', 'rect', 'diamond', 'pentagon'];
+
+  const ROLE_COLOR_STR = { p1: COLOR_P1_STR, ally: COLOR_P2_STR, ai1: COLOR_AI1_STR, ai2: COLOR_AI2_STR };
+
+  // ---------- BootScene ----------
+  class BootScene extends Phaser.Scene {
+    constructor() { super('Boot'); }
+    create() {
+      const cg = this.make.graphics({ add: false });
+      cg.fillStyle(0xffffff, 1);
+      cg.fillRoundedRect(0, 0, CHAR_SIZE, CHAR_SIZE, 8);
+      cg.generateTexture('char', CHAR_SIZE, CHAR_SIZE);
+      cg.destroy();
+
+      const bg = this.make.graphics({ add: false });
+      bg.fillStyle(0xffffff, 1);
+      bg.fillCircle(BALL_RADIUS, BALL_RADIUS, BALL_RADIUS);
+      bg.generateTexture('ball', BALL_RADIUS * 2, BALL_RADIUS * 2);
+      bg.destroy();
+
+      const pg = this.make.graphics({ add: false });
+      pg.fillStyle(0xffffff, 1);
+      pg.fillCircle(2, 2, 2);
+      pg.generateTexture('particle', 4, 4);
+      pg.destroy();
+
+      this.scene.start('Game');
+    }
+  }
+
+  // ---------- GameScene ----------
+  class GameScene extends Phaser.Scene {
+    constructor() { super('Game'); }
+
+    create() {
+      this.gameState = 'ready';
+      this.winner = null;
+      this.hintTimer = HINT_FRAMES;
+      this.ballSpeedMultiplier = 1.0;
+
+      this.physics.world.setBounds(0, 0, WIDTH, HEIGHT);
+
+      this.ballsGroup = this.physics.add.group({ allowGravity: false });
+      this.charGroup = this.physics.add.group({ allowGravity: false });
+
+      this.overlayGfx = this.add.graphics().setDepth(20);
+
+      this.keyW = this.input.keyboard.addKey('W');
+      this.keyA = this.input.keyboard.addKey('A');
+      this.keyS = this.input.keyboard.addKey('S');
+      this.keyD = this.input.keyboard.addKey('D');
+
+      this.p1History = [];
+      this.p2History = [];
+      this.teamPlayer = [];
+      this.teamAI = [];
+      this.obstacles = [];
+      this.obstacleData = [];
+      this.effects = [];
+      this.obstacleTextures = [];
+
+      // UI text refs
+      this.speedMinusText = null;
+      this.speedPlusText = null;
+      this.speedLabel = null;
+      this.hintText = null;
+      this.startTitle = null;
+      this.startInst1 = null;
+      this.startInst2 = null;
+      this.startBtnText = null;
+      this.gameoverMsg = null;
+      this.restartBtnText = null;
+
+      this.speedDownBtn = null;
+      this.speedUpBtn = null;
+      this.restartBtnBounds = null;
+
+      // Pointer handler
+      this.input.on('pointerdown', (pointer) => {
+        const px = pointer.x;
+        const py = pointer.y;
+
+        if (this.speedDownBtn) {
+          const b = this.speedDownBtn;
+          if (px >= b.x && px <= b.x + b.w && py >= b.y && py <= b.y + b.h) {
+            this.ballSpeedMultiplier = Math.max(0.3, this.ballSpeedMultiplier - 0.25);
+            return;
+          }
+        }
+        if (this.speedUpBtn) {
+          const b = this.speedUpBtn;
+          if (px >= b.x && px <= b.x + b.w && py >= b.y && py <= b.y + b.h) {
+            this.ballSpeedMultiplier = Math.min(3.0, this.ballSpeedMultiplier + 0.25);
+            return;
+          }
+        }
+
+        if (this.gameState === 'ready') {
+          this.startGame();
+        } else if (this.gameState === 'playing') {
+          const p1 = this.teamPlayer[0];
+          if (p1 && p1.getData('hp') > 0 && p1.getData('dyingTimer') <= 0) {
+            this.tryThrowToward(p1, pointer.x, pointer.y);
+          }
+        } else if (this.gameState === 'gameover') {
+          const rb = this.restartBtnBounds;
+          if (rb && px >= rb.x && px <= rb.x + rb.w && py >= rb.y && py <= rb.y + rb.h) {
+            this.resetGame();
+          }
+        }
+      });
+
+      this.input.keyboard.on('keydown', () => {
+        if (this.gameState === 'ready') this.startGame();
+      });
+
+      // Listen for world bounds events (for ball bounce counting)
+      this.physics.world.on('worldbounds', (body, up, down, left, right) => {
+        const go = body.gameObject;
+        if (go && go.active && go.getData('isBall')) {
+          let bl = go.getData('bouncesLeft');
+          if (bl === undefined) return;  // ball may have been destroyed
+          bl--;
+          go.setData('bouncesLeft', bl);
+          if (bl <= 0) {
+            go.setData('shouldRemove', true);
+          }
+        }
+      });
+
+      this.resetGame();
+    }
+
+    createCharacter(x, y, tint, team, role) {
+      const sprite = this.physics.add.sprite(x, y, 'char');
+      sprite.setTint(tint);
+      sprite.setCollideWorldBounds(true);
+      sprite.setDepth(10);
+      // Body: circle collision matching CHAR_SIZE
+      const half = CHAR_SIZE / 2;
+      sprite.body.setCircle(half, (CHAR_SIZE - CHAR_SIZE) / 2, (CHAR_SIZE - CHAR_SIZE) / 2);
+      sprite.body.setOffset(0, 0);
+      sprite.body.setAllowGravity(false, false);
+      sprite.body.setBounce(0, 0);
+      sprite.body.setImmovable(false);
+      // Drag so chars stop when no input
+      sprite.body.setDrag(8000);
+      sprite.body.setMaxSpeed(CHAR_SPEED * 60 * 1.1);
+
+      sprite.setData('team', team);
+      sprite.setData('role', role);
+      sprite.setData('hp', MAX_HP);
+      sprite.setData('maxHp', MAX_HP);
+      sprite.setData('facingAngle', team === 'player' ? 0 : Math.PI);
+      sprite.setData('throwCooldown', 0);
+      sprite.setData('aiState', 'AGGRESSIVE');
+      sprite.setData('aiHoldTimer', 60);
+      sprite.setData('aiWanderAngle', Math.random() * Math.PI * 2);
+      sprite.setData('aiWanderTimer', 0);
+      sprite.setData('targetIndex', 0);
+      sprite.setData('targetHitRates', {});
+      sprite.setData('dyingTimer', 0);
+      sprite.setData('deathParticles', []);
+
+      this.charGroup.add(sprite);
+      return sprite;
+    }
+
+    resetGame() {
+      // Destroy UI texts
+      this.destroyUITexts();
+
+      // Clear groups (destroy children)
+      this.ballsGroup.clear(true, true);
+      this.charGroup.clear(true, true);
+
+      // Remove old colliders/overlaps
+      if (this.charObstacleCollider) { this.charObstacleCollider.destroy(); this.charObstacleCollider = null; }
+      if (this.ballCharOverlap) { this.ballCharOverlap.destroy(); this.ballCharOverlap = null; }
+
+      // Clear obstacle group
+      if (this.obstacleGroup) {
+        this.obstacleGroup.clear(true, true);
+      } else {
+        this.obstacleGroup = this.physics.add.staticGroup();
+      }
+
+      // Destroy old obstacle textures
+      for (const key of this.obstacleTextures) {
+        if (this.textures.exists(key)) this.textures.remove(key);
+      }
+      this.obstacleTextures = [];
+
+      this.teamPlayer = [];
+      this.teamAI = [];
+      this.obstacles = [];
+      this.obstacleData = [];
+      this.effects = [];
+      this.p1History.length = 0;
+      this.p2History.length = 0;
+
+      // Create characters
+      const p1 = this.createCharacter(110, 180, COLOR_P1, 'player', 'p1');
+      const ally = this.createCharacter(110, 320, COLOR_P2, 'player', 'ally');
+      const ai1 = this.createCharacter(690, 180, COLOR_AI1, 'ai', 'ai1');
+      const ai2 = this.createCharacter(690, 320, COLOR_AI2, 'ai', 'ai2');
+      this.teamPlayer = [p1, ally];
+      this.teamAI = [ai1, ai2];
+
+      // Generate obstacles
+      this.generateObstacles();
+
+      // Add collider: chars vs obstacles
+      this.charObstacleCollider = this.physics.add.collider(this.charGroup, this.obstacleGroup);
+
+      // Add overlap: balls vs chars
+      this.ballCharOverlap = this.physics.add.overlap(this.ballsGroup, this.charGroup, (ball, char) => {
+        this.onBallHit(ball, char);
+      });
+
+      this.gameState = 'ready';
+      this.winner = null;
+      this.hintTimer = HINT_FRAMES;
+      this.restartBtnBounds = null;
+      this.speedDownBtn = null;
+      this.speedUpBtn = null;
+      // Show start screen text, hide game over text
+      if (this.startTitle) this.startTitle.setAlpha(1);
+      if (this.startInst1) this.startInst1.setAlpha(1);
+      if (this.startInst2) this.startInst2.setAlpha(1);
+      if (this.startBtnText) this.startBtnText.setAlpha(1);
+      if (this.gameoverMsg) this.gameoverMsg.setAlpha(0);
+      if (this.restartBtnText) this.restartBtnText.setAlpha(0);
+    }
+
+    startGame() {
+      this.gameState = 'playing';
+      this.hintTimer = HINT_FRAMES;
+      // Hide start screen text elements
+      if (this.startTitle) this.startTitle.setAlpha(0);
+      if (this.startInst1) this.startInst1.setAlpha(0);
+      if (this.startInst2) this.startInst2.setAlpha(0);
+      if (this.startBtnText) this.startBtnText.setAlpha(0);
+      // Hide game over screen if visible
+      if (this.gameoverMsg) this.gameoverMsg.setAlpha(0);
+      if (this.restartBtnText) this.restartBtnText.setAlpha(0);
+    }
+
+    // ---- Obstacle generation ----
+    generateObstacles() {
+      this.obstacles = [];
+      const count = OBSTACLE_MIN_COUNT + Math.floor(Math.random() * (OBSTACLE_MAX_COUNT - OBSTACLE_MIN_COUNT + 1));
+      const margin = 30;
+      const minFromSpawn = 130;
+      const spawns = [
+        { x: 110, y: 180 }, { x: 110, y: 320 },
+        { x: 690, y: 180 }, { x: 690, y: 320 },
+      ];
+      let attempts = 0;
+
+      while (this.obstacles.length < count && attempts < 400) {
+        attempts++;
+        const size = 10 + Math.random() * 18;
+        const x = margin + size + Math.random() * (WIDTH - 2 * (margin + size));
+        const y = margin + size + Math.random() * (HEIGHT - 2 * (margin + size));
+
+        let tooCloseToSpawn = false;
+        for (const s of spawns) {
+          if (Math.hypot(x - s.x, y - s.y) < minFromSpawn + size - 10) {
+            tooCloseToSpawn = true; break;
+          }
+        }
+        if (tooCloseToSpawn) continue;
+
+        let tooClose = false;
+        for (const o of this.obstacles) {
+          if (Math.hypot(x - o.x, y - o.y) < o.size + size + 10) { tooClose = true; break; }
+        }
+        if (tooClose) continue;
+
+        const shape = SHAPES[Math.floor(Math.random() * SHAPES.length)];
+        const color = OBSTACLE_COLORS[Math.floor(Math.random() * OBSTACLE_COLORS.length)];
+        const rotation = Math.random() * Math.PI * 2;
+        const width = size * (0.6 + Math.random() * 1.0);
+        const height = size * (0.6 + Math.random() * 1.0);
+
+        const obs = { x, y, size, shape, color, rotation, width, height };
+        this.obstacles.push(obs);
+        this.createObstacleSprite(obs);
+      }
+      this.obstacleData = this.obstacles.slice();
+    }
+
+    createObstacleSprite(obs) {
+      const key = 'obs_' + obs.x.toFixed(0) + '_' + obs.y.toFixed(0) + '_' + Math.random().toString(36).substr(2, 5);
+      this.obstacleTextures.push(key);
+
+      const g = this.make.graphics({ add: false });
+      let tw, th;
+      if (obs.shape === 'circle') { tw = th = Math.ceil(obs.size * 2); }
+      else if (obs.shape === 'ellipse') { tw = Math.ceil(obs.width * 2); th = Math.ceil(obs.height * 2); }
+      else if (obs.shape === 'rect' || obs.shape === 'diamond') { tw = Math.ceil(obs.width); th = Math.ceil(obs.height); }
+      else if (obs.shape === 'pentagon') { tw = th = Math.ceil(obs.size * 2); }
+      else { tw = th = Math.ceil(obs.size * 2); }
+
+      const cx = tw / 2, cy = th / 2;
+      const colorNum = Phaser.Display.Color.HexStringToColor(obs.color).color;
+      g.fillStyle(colorNum, 1);
+      g.lineStyle(1.5, 0x4a3d33, 1);
+
+      if (obs.shape === 'circle') {
+        g.fillCircle(cx, cy, obs.size);
+        g.strokeCircle(cx, cy, obs.size);
+      } else if (obs.shape === 'ellipse') {
+        g.fillEllipse(cx, cy, obs.width, obs.height);
+        g.strokeEllipse(cx, cy, obs.width, obs.height);
+      } else if (obs.shape === 'rect') {
+        g.fillRect(cx - obs.width / 2, cy - obs.height / 2, obs.width, obs.height);
+        g.strokeRect(cx - obs.width / 2, cy - obs.height / 2, obs.width, obs.height);
+      } else if (obs.shape === 'diamond') {
+        g.fillPoints([
+          { x: cx, y: cy - obs.height / 2 },
+          { x: cx + obs.width / 2, y: cy },
+          { x: cx, y: cy + obs.height / 2 },
+          { x: cx - obs.width / 2, y: cy },
+        ], true);
+        g.strokePoints([
+          { x: cx, y: cy - obs.height / 2 },
+          { x: cx + obs.width / 2, y: cy },
+          { x: cx, y: cy + obs.height / 2 },
+          { x: cx - obs.width / 2, y: cy },
+        ], true);
+      } else if (obs.shape === 'pentagon') {
+        const pts = [];
+        for (let i = 0; i < 5; i++) {
+          const angle = (i * 2 * Math.PI / 5) - Math.PI / 2;
+          pts.push({ x: cx + Math.cos(angle) * obs.size * 0.95, y: cy + Math.sin(angle) * obs.size * 0.95 });
+        }
+        g.fillPoints(pts, true);
+        g.strokePoints(pts, true);
+      }
+
+      g.fillStyle(0xffffff, 0.25);
+      g.fillCircle(cx - obs.size / 4, cy - obs.size / 4, obs.size * 0.35);
+
+      g.generateTexture(key, tw, th);
+      g.destroy();
+
+      const sprite = this.obstacleGroup.create(obs.x, obs.y, key);
+      sprite.setRotation(obs.rotation);
+      sprite.setDepth(1);
+
+      // Static bodies don't need setImmovable or setAllowGravity
+      // Set physics body
+      if (obs.shape === 'circle') {
+        sprite.body.setCircle(obs.size, (tw - obs.size * 2) / 2, (th - obs.size * 2) / 2);
+      } else if (obs.shape === 'ellipse') {
+        const avgR = Math.max(obs.width, obs.height) / 2;
+        sprite.body.setCircle(avgR, (tw - avgR * 2) / 2, (th - avgR * 2) / 2);
+      } else {
+        sprite.body.setSize(Math.ceil(obs.width), Math.ceil(obs.height));
+        sprite.body.setOffset(Math.floor((tw - obs.width) / 2), Math.floor((th - obs.height) / 2));
+      }
+    }
+
+    // ---- Throwing ----
+    tryThrowToward(thrower, tx, ty) {
+      if (thrower.getData('throwCooldown') > 0) return;
+      const dx = tx - thrower.x;
+      const dy = ty - thrower.y;
+      const dist = Math.hypot(dx, dy);
+      if (dist < 1) return;
+      const ndx = dx / dist;
+      const ndy = dy / dist;
+      const speed = thrower.getData('team') === 'player' ? PLAYER_BALL_SPEED : AI_BALL_SPEED;
+      const spawnDist = CHAR_SIZE / 2 + BALL_RADIUS + 4;
+      const bx = thrower.x + ndx * spawnDist;
+      const by = thrower.y + ndy * spawnDist;
+
+      const ball = this.physics.add.sprite(bx, by, 'ball');
+      const team = thrower.getData('team');
+      ball.setTint(team === 'player' ? BALL_COLOR_PLAYER : BALL_COLOR_AI);
+      ball.setDepth(5);
+      ball.body.setAllowGravity(false, false);
+      ball.body.setCircle(BALL_RADIUS, 0, 0);
+      ball.setCollideWorldBounds(true);
+      ball.body.setBounce(1, 1);
+      ball.body.onWorldBounds = true;
+
+      const speedMul = this.ballSpeedMultiplier;
+      ball.setVelocity(ndx * speed * 60 * speedMul, ndy * speed * 60 * speedMul);
+
+      ball.setData('isBall', true);
+      ball.setData('owner', thrower);
+      ball.setData('ownerTeam', team);
+      ball.setData('bouncesLeft', BALL_MAX_BOUNCES);
+      ball.setData('trail', []);
+      ball.setData('shouldRemove', false);
+
+      this.ballsGroup.add(ball);
+      thrower.setData('throwCooldown', PLAYER_THROW_COOLDOWN);
+      thrower.setData('facingAngle', Math.atan2(ndy, ndx));
+    }
+
+    nearestEnemy(character) {
+      const enemies = character.getData('team') === 'player' ? this.teamAI : this.teamPlayer;
+      let best = null, bestD = Infinity;
+      for (const e of enemies) {
+        if (e.getData('hp') <= 0 || e.getData('dyingTimer') > 0) continue;
+        const d = Math.hypot(e.x - character.x, e.y - character.y);
+        if (d < bestD) { bestD = d; best = e; }
+      }
+      return best;
+    }
+
+    pickTarget(ai) {
+      const enemies = ai.getData('team') === 'player' ? this.teamAI : this.teamPlayer;
+      const alive = enemies.filter(e => e.getData('hp') > 0 && e.getData('dyingTimer') <= 0);
+      if (alive.length === 0) return null;
+      if (alive.length === 1) return alive[0];
+      let idx = ai.getData('targetIndex') || 0;
+      const target = alive[idx % alive.length];
+      ai.setData('targetIndex', (idx + 1) % alive.length);
+      return target;
+    }
+
+    // ---- Ball hit handler ----
+    onBallHit(ball, char) {
+      if (!ball.active || !char.active) return;
+      if (ball.getData('shouldRemove')) return;
+      const ballTeam = ball.getData('ownerTeam');
+      const charTeam = char.getData('team');
+      if (ballTeam === charTeam) return;
+      if (char.getData('hp') <= 0 || char.getData('dyingTimer') > 0) return;
+
+      let hp = char.getData('hp');
+      hp = Math.max(0, hp - 1);
+      char.setData('hp', hp);
+
+      const colorStr = ROLE_COLOR_STR[char.getData('role')] || COLOR_P1_STR;
+      this.spawnHitEffect(char.x, char.y, colorStr);
+      this.cameras.main.shake(200, 0.005);
+
+      const owner = ball.getData('owner');
+      if (owner && owner.active) {
+        const targetRole = char.getData('role');
+        const rates = owner.getData('targetHitRates');
+        if (rates[targetRole]) {
+          rates[targetRole].hits++;
+        }
+      }
+
+      ball.setData('shouldRemove', true);
+
+      if (hp <= 0) {
+        char.setData('dyingTimer', 30);
+        char.setVisible(false);
+        const particles = [];
+        for (let p = 0; p < 12; p++) {
+          const angle = Math.random() * Math.PI * 2;
+          const spd = 1 + Math.random() * 3;
+          particles.push({
+            x: 0, y: 0,
+            vx: Math.cos(angle) * spd,
+            vy: Math.sin(angle) * spd,
+            life: 30,
+            size: 2 + Math.random() * 3,
+            color: '#' + Math.floor(Math.random() * 16777215).toString(16).padStart(6, '0'),
+          });
+        }
+        char.setData('deathParticles', particles);
+        char.body.enable = false;
+      } else {
+        if (this.allDead(this.teamAI)) { this.endGame('player'); return; }
+        if (this.allDead(this.teamPlayer)) { this.endGame('ai'); return; }
+      }
+    }
+
+    allDead(team) {
+      return team.every(c => c.getData('hp') <= 0 && c.getData('dyingTimer') <= 0);
+    }
+
+    endGame(winner) {
+      this.gameState = 'gameover';
+      this.winner = winner;
+      // Ensure game over text is visible
+      if (this.gameoverMsg) this.gameoverMsg.setAlpha(1);
+      if (this.restartBtnText) this.restartBtnText.setAlpha(1);
+    }
+
+    // ---- Hit effects ----
+    spawnHitEffect(x, y, color) {
+      const particles = [];
+      const PARTICLE_COUNT = 16;
+      for (let i = 0; i < PARTICLE_COUNT; i++) {
+        const angle = Math.random() * Math.PI * 2;
+        const speed = 2 + Math.random() * 4;
+        const isHighlight = i < 4;
+        particles.push({
+          x, y,
+          vx: Math.cos(angle) * speed,
+          vy: Math.sin(angle) * speed,
+          size: 2 + Math.random() * 3,
+          life: 20 + Math.random() * 10,
+          maxLife: 20 + Math.random() * 10,
+          color: isHighlight ? '#ffffff' : color,
+        });
+      }
+      this.effects.push({ x, y, color, ringRadius: 0, ringAlpha: 0.6, ringMaxRadius: 120, particles, age: 0, maxAge: 30 });
+    }
+
+    updateEffects() {
+      for (let i = this.effects.length - 1; i >= 0; i--) {
+        const e = this.effects[i];
+        e.age++;
+        e.ringRadius = e.ringMaxRadius * Math.min(1, e.age / 15);
+        e.ringAlpha = 0.6 * Math.max(0, 1 - e.age / 15);
+        for (const p of e.particles) {
+          p.x += p.vx; p.y += p.vy;
+          p.vy += 0.1; p.vx *= 0.97; p.vy *= 0.97;
+          p.life--;
+        }
+        if (e.age >= e.maxAge) this.effects.splice(i, 1);
+      }
+    }
+
+    // ---- History tracking ----
+    trackHistory(history, c) {
+      history.push({ x: c.x, y: c.y });
+      if (history.length > HISTORY_LEN) history.shift();
+    }
+
+    estimateVelocity(history) {
+      if (history.length < 2) return { vx: 0, vy: 0 };
+      const first = history[0];
+      const last = history[history.length - 1];
+      const dt = history.length - 1;
+      return { vx: (last.x - first.x) / dt, vy: (last.y - first.y) / dt };
+    }
+
+    estimatePlayerVelocity() {
+      const v1 = this.estimateVelocity(this.p1History);
+      const v2 = this.estimateVelocity(this.p2History);
+      return { vx: (v1.vx + v2.vx) * 0.5, vy: (v1.vy + v2.vy) * 0.5 };
+    }
+
+    // ---- P1 update ----
+    updateP1() {
+      const p1 = this.teamPlayer[0];
+      if (!p1 || !p1.active || p1.getData('hp') <= 0 || p1.getData('dyingTimer') > 0) return;
+      this.trackHistory(this.p1History, p1);
+
+      let dx = 0, dy = 0;
+      if (this.keyW.isDown) dy -= 1;
+      if (this.keyS.isDown) dy += 1;
+      if (this.keyA.isDown) dx -= 1;
+      if (this.keyD.isDown) dx += 1;
+
+      if (dx !== 0 && dy !== 0) { dx *= 1 / Math.SQRT2; dy *= 1 / Math.SQRT2; }
+
+      if (dx === 0 && dy === 0) {
+        p1.setVelocity(0, 0);
+      } else {
+        p1.setVelocity(dx * CHAR_SPEED * 60, dy * CHAR_SPEED * 60);
+      }
+
+      const px = this.input.x;
+      const py = this.input.y;
+      const aimDx = px - p1.x;
+      const aimDy = py - p1.y;
+      if (Math.hypot(aimDx, aimDy) > 1) {
+        p1.setData('facingAngle', Math.atan2(aimDy, aimDx));
+      }
+
+      let cd = p1.getData('throwCooldown');
+      if (cd > 0) p1.setData('throwCooldown', cd - 1);
+
+      this.resolveCharObstacles(p1);
+    }
+
+    // ---- Ally update ----
+    updateAlly() {
+      const ally = this.teamPlayer[1];
+      if (!ally || !ally.active) return;
+      if (ally.getData('dyingTimer') > 0) return;
+      this.trackHistory(this.p2History, ally);
+      this.updateAIChar(ally);
+    }
+
+    // ---- AI logic ----
+    updateAIChar(ai) {
+      if (!ai.active || ai.getData('hp') <= 0 || ai.getData('dyingTimer') > 0) return;
+
+      const pVel = this.estimatePlayerVelocity();
+      const aiX = ai.x;
+      const aiY = ai.y;
+
+      let avoidX = 0, avoidY = 0;
+      let threatScore = 0;
+      const PREDICT_FRAMES = 24;
+      const DANGER_RADIUS = 70;
+
+      const balls = this.ballsGroup.getChildren();
+      for (const b of balls) {
+        if (!b.active || b.getData('shouldRemove')) continue;
+        if (b.getData('ownerTeam') === ai.getData('team')) continue;
+        const owner = b.getData('owner');
+        if (owner && (!owner.active || owner.getData('hp') <= 0 || owner.getData('dyingTimer') > 0)) continue;
+
+        const bdx = b.x - aiX;
+        const bdy = b.y - aiY;
+        const d = Math.hypot(bdx, bdy);
+        if (d > AI_THREAT_RANGE) continue;
+
+        const vx = b.body.velocity.x / 60;
+        const vy = b.body.velocity.y / 60;
+        const vlen = Math.hypot(vx, vy);
+        if (vlen < 0.01) continue;
+
+        const speedFactor = Math.min(3.0, vlen / AI_BALL_SPEED);
+        const fx = b.x + vx * PREDICT_FRAMES;
+        const fy = b.y + vy * PREDICT_FRAMES;
+        const fdx = fx - aiX;
+        const fdy = fy - aiY;
+        const fDist = Math.hypot(fdx, fdy);
+
+        const dot = (vx * bdx + vy * bdy) / (vlen * d);
+        if (dot <= 0 && fDist >= DANGER_RADIUS) continue;
+
+        const bvx = vx / vlen;
+        const bvy = vy / vlen;
+        const perpX = -bvy;
+        const perpY = bvx;
+        const sideDot = perpX * bdx + perpY * bdy;
+        const sign = sideDot > 0 ? -1 : 1;
+        const w = d > 0 ? 1 / (d + 20) : 1;
+
+        avoidX += perpX * sign * w * PERP_DODGE_WEIGHT * speedFactor;
+        avoidY += perpY * sign * w * PERP_DODGE_WEIGHT * speedFactor;
+
+        const urgency = (DANGER_RADIUS - Math.min(fDist, DANGER_RADIUS)) / DANGER_RADIUS;
+        threatScore += (0.5 + urgency) * speedFactor;
+      }
+
+      const aLen = Math.hypot(avoidX, avoidY);
+      if (aLen > 0) { avoidX /= aLen; avoidY /= aLen; }
+
+      const hp = ai.getData('hp');
+      if (hp <= AI_STATE_HP_RETREAT) ai.setData('aiState', 'RETREAT');
+      else if (threatScore >= AI_STATE_THREAT_DEFENSIVE) ai.setData('aiState', 'DEFENSIVE');
+      else ai.setData('aiState', 'AGGRESSIVE');
+      const aiState = ai.getData('aiState');
+
+      const margin = 60;
+      let centerX = 0, centerY = 0;
+      if (aiX < margin) centerX = (margin - aiX) / margin;
+      if (aiX > WIDTH - margin) centerX = -(aiX - (WIDTH - margin)) / margin;
+      if (aiY < margin) centerY = (margin - aiY) / margin;
+      if (aiY > HEIGHT - margin) centerY = -(aiY - (HEIGHT - margin)) / margin;
+
+      let mx = 0, my = 0;
+      const dodgeGain = aiState === 'RETREAT' ? 1.6 : aiState === 'DEFENSIVE' ? 1.3 : 1.0;
+
+      if (threatScore > 0.1) {
+        const t = Math.min(1, threatScore * dodgeGain);
+        mx = avoidX * t + centerX * 0.3;
+        my = avoidY * t + centerY * 0.3;
+      } else {
+        const target = this.nearestEnemy(ai);
+        if (aiState === 'RETREAT') {
+          const goalX = ai.getData('team') === 'player' ? RETREAT_GOAL_X_PLAYER : RETREAT_GOAL_X_AI;
+          const rdx = goalX - aiX;
+          const rdy = HEIGHT / 2 - aiY;
+          const rd = Math.hypot(rdx, rdy) || 1;
+          mx = (rdx / rd) * 0.7 + centerX * 0.3;
+          my = (rdy / rd) * 0.7 + centerY * 0.3;
+        } else if (target) {
+          const tdx = target.x - aiX;
+          const tdy = target.y - aiY;
+          const td = Math.hypot(tdx, tdy) || 1;
+          const ideal = aiState === 'AGGRESSIVE' ? AGGRESSIVE_IDEAL_DIST : DEFENSIVE_IDEAL_DIST;
+          const diff = td - ideal;
+          const strength = Math.min(0.6, Math.abs(diff) / 200);
+          const dir = diff > 0 ? 1 : -1;
+          mx = (tdx / td) * dir * strength + centerX * 0.3;
+          my = (tdy / td) * dir * strength + centerY * 0.3;
+        } else {
+          let wt = ai.getData('aiWanderTimer') || 0;
+          wt--;
+          if (wt <= 0) { ai.setData('aiWanderAngle', Math.random() * Math.PI * 2); wt = 40 + Math.floor(Math.random() * 50); }
+          ai.setData('aiWanderTimer', wt);
+          const wa = ai.getData('aiWanderAngle');
+          mx = Math.cos(wa) * 0.25 + centerX * 0.3;
+          my = Math.sin(wa) * 0.25 + centerY * 0.3;
+        }
+      }
+
+      const mates = ai.getData('team') === 'player' ? this.teamPlayer : this.teamAI;
+      for (const mate of mates) {
+        if (mate === ai || !mate.active || mate.getData('hp') <= 0 || mate.getData('dyingTimer') > 0) continue;
+        const mdx = aiX - mate.x;
+        const mdy = aiY - mate.y;
+        const md = Math.hypot(mdx, mdy);
+        if (md < TEAM_SPREAD_MIN && md > 0.01) {
+          const force = (TEAM_SPREAD_MIN - md) / TEAM_SPREAD_MIN * TEAM_SPREAD_FORCE;
+          mx += (mdx / md) * force;
+          my += (mdy / md) * force;
+        }
+      }
+      if (ai.getData('team') === 'ai') {
+        const cY = HEIGHT / 2;
+        const pushDir = ai.getData('role') === 'ai1' ? -1 : 1;
+        if (Math.abs(aiY - cY) < ENEMY_VERTICAL_SPLIT * 0.5) my += pushDir * 0.15;
+      }
+
+      if (mx === 0 && my === 0) {
+        ai.setVelocity(0, 0);
+      } else {
+        ai.setVelocity(mx * CHAR_SPEED * 60, my * CHAR_SPEED * 60);
+      }
+
+      this.resolveCharObstacles(ai);
+
+      const half = CHAR_SIZE / 2;
+      if (ai.x < half) ai.x = half;
+      if (ai.x > WIDTH - half) ai.x = WIDTH - half;
+      if (ai.y < half) ai.y = half;
+      if (ai.y > HEIGHT - half) ai.y = HEIGHT - half;
+
+      // Throw logic
+      let tcd = ai.getData('throwCooldown');
+      if (tcd > 0) ai.setData('throwCooldown', tcd - 1);
+
+      let aiHoldTimer = ai.getData('aiHoldTimer') || 0;
+      ai.setData('aiHoldTimer', aiHoldTimer + 1);
+
+      const tgt = this.pickTarget(ai);
+      if (tgt) {
+        const MIN_HOLD = aiState === 'AGGRESSIVE' ? 25 : aiState === 'RETREAT' ? 60 : 40;
+        const MAX_HOLD = aiState === 'AGGRESSIVE' ? 70 : aiState === 'RETREAT' ? 150 : 100;
+
+        if (aiHoldTimer >= MIN_HOLD) {
+          const tdx = tgt.x - aiX;
+          const tdy = tgt.y - aiY;
+          const td = Math.hypot(tdx, tdy) || 1;
+
+          const tVel = tgt === this.teamPlayer[0] ? this.estimateVelocity(this.p1History)
+                     : tgt === this.teamPlayer[1] ? this.estimateVelocity(this.p2History)
+                     : { vx: 0, vy: 0 };
+          const closingSpeed = -(tVel.vx * tdx + tVel.vy * tdy) / td;
+          const closingFactor = Math.max(0, Math.min(1, closingSpeed / AI_BALL_SPEED));
+          const distFactor = 1 - Math.min(1, td / 500);
+          let opportunity = distFactor * 0.3 + closingFactor * 0.5;
+          if (tgt.getData('hp') <= 1) opportunity += 0.2;
+
+          const threshold = aiState === 'RETREAT' ? 0.7 : aiState === 'AGGRESSIVE' ? 0.3 : 0.5;
+          const forcedThrow = aiHoldTimer >= MAX_HOLD;
+
+          if (opportunity >= threshold || forcedThrow) {
+            ai.setData('aiHoldTimer', 0);
+            if (td < 40) return;
+
+            const travelFrames = td / AI_BALL_SPEED;
+            const leadX = tgt.x + tVel.vx * travelFrames;
+            const leadY = tgt.y + tVel.vy * travelFrames;
+
+            const rates = ai.getData('targetHitRates');
+            const targetRole = tgt.getData('role');
+            const stats = rates[targetRole];
+            const hitRate = (stats && stats.total >= 3) ? stats.hits / stats.total : 0.5;
+            const jitterRange = JITTER_MIN + (1 - hitRate) * (JITTER_MAX - JITTER_MIN);
+            const jitterX = (Math.random() - 0.5) * jitterRange;
+            const jitterY = (Math.random() - 0.5) * jitterRange;
+
+            this.tryThrowToward(ai, leadX + jitterX, leadY + jitterY);
+
+            if (!rates[targetRole]) rates[targetRole] = { hits: 0, total: 0 };
+            rates[targetRole].total++;
+          }
+        }
+      }
+    }
+
+    // ---- Resolve character-obstacle collisions manually ----
+    resolveCharObstacles(c) {
+      const cr = CHAR_SIZE / 2;
+      let nx = c.x, ny = c.y;
+
+      for (let iter = 0; iter < 3; iter++) {
+        let moved = false;
+        for (const o of this.obstacleData) {
+          const or = o.size;
+          let minD, dist;
+          let ddx = nx - o.x, ddy = ny - o.y;
+
+          if (o.shape === 'rect' || o.shape === 'diamond' || o.shape === 'pentagon') {
+            const ow = o.width, oh = o.height;
+            const closestX = Math.max(o.x - ow / 2, Math.min(nx, o.x + ow / 2));
+            const closestY = Math.max(o.y - oh / 2, Math.min(ny, o.y + oh / 2));
+            ddx = nx - closestX; ddy = ny - closestY;
+            dist = Math.hypot(ddx, ddy);
+            minD = cr;
+          } else if (o.shape === 'ellipse') {
+            const avgRad = (o.width + o.height) / 2;
+            dist = Math.hypot(ddx, ddy);
+            minD = cr + avgRad;
+          } else {
+            dist = Math.hypot(ddx, ddy);
+            minD = cr + or;
+          }
+
+          if (dist < minD && dist > 0.001) {
+            const push = minD - dist;
+            nx += (ddx / dist) * push;
+            ny += (ddy / dist) * push;
+            moved = true;
+          } else if (dist <= 0.001) {
+            ny -= minD; moved = true;
+          }
+        }
+        if (!moved) break;
+      }
+
+      c.x = nx;
+      c.y = ny;
+      const half = CHAR_SIZE / 2;
+      if (c.x < half) c.x = half;
+      if (c.x > WIDTH - half) c.x = WIDTH - half;
+      if (c.y < half) c.y = half;
+      if (c.y > HEIGHT - half) c.y = HEIGHT - half;
+    }
+
+    // ---- Ball manual obstacle bounce ----
+    updateBallObstacleCollisions() {
+      const balls = this.ballsGroup.getChildren();
+      for (const b of balls) {
+        if (!b.active || b.getData('shouldRemove')) continue;
+
+        for (const o of this.obstacleData) {
+          const or = o.size;
+          let minD, dist;
+          let ddx = b.x - o.x, ddy = b.y - o.y;
+
+          if (o.shape === 'rect' || o.shape === 'diamond' || o.shape === 'pentagon') {
+            const ow = o.width, oh = o.height;
+            const closestX = Math.max(o.x - ow / 2, Math.min(b.x, o.x + ow / 2));
+            const closestY = Math.max(o.y - oh / 2, Math.min(b.y, o.y + oh / 2));
+            ddx = b.x - closestX; ddy = b.y - closestY;
+            dist = Math.hypot(ddx, ddy);
+            minD = BALL_RADIUS;
+          } else if (o.shape === 'ellipse') {
+            const avgRad = (o.width + o.height) / 2;
+            dist = Math.hypot(ddx, ddy);
+            minD = BALL_RADIUS + avgRad;
+          } else {
+            dist = Math.hypot(ddx, ddy);
+            minD = BALL_RADIUS + or;
+          }
+
+          if (dist < minD) {
+            if (dist > 0.001) {
+              const overlap = minD - dist;
+              b.x += (ddx / dist) * overlap;
+              b.y += (ddy / dist) * overlap;
+              const nx = ddx / dist;
+              const ny = ddy / dist;
+              const vx = b.body.velocity.x;
+              const vy = b.body.velocity.y;
+              const dot = (vx / 60 * nx + vy / 60 * ny);
+              b.setVelocity(vx - 2 * dot * nx * 60, vy - 2 * dot * ny * 60);
+            } else {
+              b.setVelocity(b.body.velocity.x, -b.body.velocity.y);
+            }
+            let bl = b.getData('bouncesLeft');
+            bl--;
+            b.setData('bouncesLeft', bl);
+            if (bl <= 0) b.setData('shouldRemove', true);
+            break;
+          }
+        }
+      }
+    }
+
+    // ---- Remove dead balls ----
+    removeDeadBalls() {
+      const balls = this.ballsGroup.getChildren().slice(); // copy since we modify
+      for (const b of balls) {
+        if (!b.active) continue;
+        if (b.getData('shouldRemove')) {
+          b.destroy();
+        } else if (b.x < -50 || b.x > WIDTH + 50 || b.y < -50 || b.y > HEIGHT + 50) {
+          b.destroy();
+        }
+      }
+    }
+
+    // ---- Death animation ----
+    updateDeathAnimations() {
+      const allChars = [...this.teamPlayer, ...this.teamAI];
+      for (const c of allChars) {
+        if (!c.active) continue;
+        let dyingTimer = c.getData('dyingTimer');
+        if (dyingTimer > 0) {
+          dyingTimer--;
+          c.setData('dyingTimer', dyingTimer);
+          const particles = c.getData('deathParticles');
+          for (const p of particles) { p.x += p.vx; p.y += p.vy; p.life--; }
+
+          // Keep body disabled
+          c.body.enable = false;
+
+          if (dyingTimer <= 0) {
+            if (this.allDead(this.teamAI)) { this.endGame('player'); return; }
+            if (this.allDead(this.teamPlayer)) { this.endGame('ai'); return; }
+          }
+        }
+      }
+    }
+
+    // ---- Ball trail tracking ----
+    updateBallTrails() {
+      const balls = this.ballsGroup.getChildren();
+      for (const b of balls) {
+        if (!b.active || b.getData('shouldRemove')) continue;
+        let trail = b.getData('trail') || [];
+        trail.push({ x: b.x, y: b.y });
+        if (trail.length > 10) trail.shift();
+        b.setData('trail', trail);
+      }
+    }
+
+    // ---- Main update ----
+    update() {
+      this.renderOverlays();
+
+      if (this.hintTimer > 0) this.hintTimer--;
+
+      if (this.gameState === 'playing') {
+        this.updateP1();
+        this.updateAlly();
+        for (const ai of this.teamAI) this.updateAIChar(ai);
+        this.updateBallObstacleCollisions();
+        this.updateBallTrails();
+        this.updateEffects();
+        this.updateDeathAnimations();
+        this.removeDeadBalls();
+      }
+    }
+
+    // ---- Rendering ----
+    renderOverlays() {
+      const gfx = this.overlayGfx;
+      gfx.clear();
+
+      // Background
+      const bgCol = Phaser.Display.Color.HexStringToColor(COLOR_BG).color;
+      gfx.fillStyle(bgCol, 1);
+      gfx.fillRect(0, 0, WIDTH, HEIGHT);
+
+      // Grid
+      const gridCol = Phaser.Display.Color.HexStringToColor(COLOR_GRID).color;
+      gfx.lineStyle(1, gridCol, 1);
+      for (let x = 40; x < WIDTH; x += 40) gfx.lineBetween(x + 0.5, 0, x + 0.5, HEIGHT);
+      for (let y = 40; y < HEIGHT; y += 40) gfx.lineBetween(0, y + 0.5, WIDTH, y + 0.5);
+
+      // Obstacle shadows
+      for (const o of this.obstacleData) {
+        gfx.fillStyle(0x000000, 0.15);
+        gfx.fillEllipse(o.x, o.y + o.size + 3, o.size * 0.85 * 2, 3.5 * 2);
+      }
+
+      // Characters
+      for (const c of [...this.teamPlayer, ...this.teamAI]) {
+        if (c.active) this.drawCharacter(c, gfx);
+      }
+
+      // Balls
+      this.drawBalls(gfx);
+
+      // Effects
+      this.drawEffects(gfx);
+
+      // Speed controls
+      this.drawSpeedControls(gfx);
+
+      // Hint
+      this.drawHint(gfx);
+
+      // Start / Game over
+      if (this.gameState === 'ready') this.drawStartScreen(gfx);
+      else if (this.gameState === 'gameover') this.drawGameOver(gfx);
+    }
+
+    drawCharacter(sprite, gfx) {
+      const hp = sprite.getData('hp');
+      const dyingTimer = sprite.getData('dyingTimer');
+      const maxHp = sprite.getData('maxHp');
+
+      if (hp <= 0 && dyingTimer <= 0) return;
+
+      const cx = sprite.x;
+      const cy = sprite.y;
+      const colorStr = ROLE_COLOR_STR[sprite.getData('role')] || COLOR_P1_STR;
+      const colorNum = Phaser.Display.Color.HexStringToColor(colorStr).color;
+
+      // Death animation: draw entirely via overlay (sprite is hidden)
+      if (dyingTimer > 0) {
+        const alpha = dyingTimer / 30;
+        const scale = dyingTimer / 30;
+        const sc = CHAR_SIZE * scale;
+        gfx.fillStyle(colorNum, alpha);
+        gfx.fillRoundedRect(cx - sc / 2, cy - sc / 2, sc, sc, Math.max(1, 8 * scale));
+        gfx.lineStyle(2, 0x000000, alpha);
+        gfx.beginPath();
+        gfx.moveTo(cx - sc * 0.3, cy - sc * 0.3);
+        gfx.lineTo(cx + sc * 0.1 + sc * 0.2, cy + sc * 0.1 + sc * 0.2);
+        gfx.moveTo(cx + sc * 0.1 + sc * 0.2, cy - sc * 0.3);
+        gfx.lineTo(cx - sc * 0.3, cy + sc * 0.1 + sc * 0.2);
+        gfx.strokePath();
+        const particles = sprite.getData('deathParticles');
+        if (particles) {
+          for (const p of particles) {
+            if (p.life <= 0) continue;
+            const pAlpha = p.life / 30;
+            gfx.fillStyle(Phaser.Display.Color.HexStringToColor(p.color).color, pAlpha);
+            gfx.fillCircle(cx + p.x, cy + p.y, p.size * pAlpha);
+          }
+        }
+        return;
+      }
+
+      // Shadow
+      gfx.fillStyle(0x000000, 0.12);
+      gfx.fillEllipse(cx, cy + CHAR_SIZE / 2 + 2, CHAR_SIZE * 0.45 * 2, 4 * 2);
+
+      // Eyes
+      const facingAngle = sprite.getData('facingAngle') || 0;
+      const eyeOffsetX = Math.cos(facingAngle) * 3;
+      const eyeOffsetY = Math.sin(facingAngle) * 3;
+      const eyeR = 3;
+      const eyeY = cy - 3;
+      const eyeDx = 6;
+      gfx.fillStyle(0xffffff, 1);
+      gfx.fillCircle(cx - eyeDx / 2 + eyeOffsetX * 0.5, eyeY + eyeOffsetY * 0.5, eyeR);
+      gfx.fillCircle(cx + eyeDx / 2 + eyeOffsetX * 0.5, eyeY + eyeOffsetY * 0.5, eyeR);
+      gfx.fillStyle(0x222222, 1);
+      gfx.fillCircle(cx - eyeDx / 2 + eyeOffsetX, eyeY + eyeOffsetY, eyeR * 0.55);
+      gfx.fillCircle(cx + eyeDx / 2 + eyeOffsetX, eyeY + eyeOffsetY, eyeR * 0.55);
+
+      // HP bar
+      const w = 36, h = 6;
+      const bx = cx - w / 2;
+      const by = cy - CHAR_SIZE / 2 - 14;
+      gfx.fillStyle(0x222222, 1);
+      gfx.fillRect(bx - 1, by - 1, w + 2, h + 2);
+      gfx.fillStyle(0x444444, 1);
+      gfx.fillRect(bx, by, w, h);
+      const ratio = hp / maxHp;
+      let hpColorNum;
+      if (ratio <= 0.34) hpColorNum = Phaser.Display.Color.HexStringToColor(COLOR_HP_RED).color;
+      else if (ratio <= 0.67) hpColorNum = Phaser.Display.Color.HexStringToColor(COLOR_HP_YELLOW).color;
+      else hpColorNum = Phaser.Display.Color.HexStringToColor(COLOR_HP_GREEN).color;
+      gfx.fillStyle(hpColorNum, 1);
+      gfx.fillRect(bx, by, w * ratio, h);
+    }
+
+    drawBalls(gfx) {
+      const balls = this.ballsGroup.getChildren();
+      for (const b of balls) {
+        if (!b.active) continue;
+        const trail = b.getData('trail') || [];
+        const team = b.getData('ownerTeam');
+        const colorStr = team === 'player' ? BALL_COLOR_PLAYER_STR : BALL_COLOR_AI_STR;
+        const colorNum = Phaser.Display.Color.HexStringToColor(colorStr).color;
+
+        // Trail
+        if (trail.length > 1) {
+          for (let i = 0; i < trail.length; i++) {
+            const t = trail[i];
+            const ratio = (i + 1) / trail.length;
+            const alpha = ratio * 0.6;
+            const radius = BALL_RADIUS * (0.5 + 0.5 * ratio);
+            gfx.fillStyle(colorNum, alpha);
+            gfx.fillCircle(t.x, t.y, radius);
+          }
+        }
+
+        // Glow
+        gfx.fillStyle(colorNum, 0.25);
+        gfx.fillCircle(b.x, b.y, BALL_RADIUS * 1.6);
+
+        // Body (draw over the sprite so ball looks consistent)
+        gfx.fillStyle(colorNum, 1);
+        gfx.fillCircle(b.x, b.y, BALL_RADIUS);
+
+        // Outline
+        gfx.lineStyle(2, 0x000000, 0.5);
+        gfx.strokeCircle(b.x, b.y, BALL_RADIUS);
+
+        // Highlight
+        gfx.fillStyle(0xffffff, 0.85);
+        gfx.fillCircle(b.x - 2, b.y - 2, BALL_RADIUS * 0.4);
+      }
+    }
+
+    drawEffects(gfx) {
+      for (const e of this.effects) {
+        if (e.ringAlpha > 0.01) {
+          gfx.lineStyle(4, 0xffffff, e.ringAlpha);
+          gfx.strokeCircle(e.x, e.y, e.ringRadius);
+          gfx.fillStyle(0xffffff, e.ringAlpha * 0.3);
+          gfx.fillCircle(e.x, e.y, e.ringRadius * 0.6);
+        }
+        for (const p of e.particles) {
+          if (p.life <= 0) continue;
+          const alpha = p.life / p.maxLife;
+          gfx.fillStyle(Phaser.Display.Color.HexStringToColor(p.color).color, alpha);
+          gfx.fillCircle(p.x, p.y, p.size * alpha);
+        }
+      }
+    }
+
+    drawSpeedControls(gfx) {
+      const btnW = 40, btnH = 32, gap = 8, btnY = 12, btnStartX = WIDTH - 200;
+      const btn1X = btnStartX, btn2X = btnStartX + btnW + gap;
+      const spdLabelX = btnStartX + 2 * btnW + gap * 2 + 30;
+
+      this.speedDownBtn = { x: btn1X, y: btnY, w: btnW, h: btnH };
+      this.speedUpBtn = { x: btn2X, y: btnY, w: btnW, h: btnH };
+
+      gfx.fillStyle(0x4a5568, 1);
+      gfx.fillRoundedRect(btn1X, btnY, btnW, btnH, 6);
+      gfx.fillRoundedRect(btn2X, btnY, btnW, btnH, 6);
+
+      if (!this.speedMinusText) {
+        this.speedMinusText = this.add.text(btn1X + btnW / 2, btnY + btnH / 2, '−', {
+          fontFamily: '-apple-system, "PingFang SC", "Microsoft YaHei", sans-serif',
+          fontSize: '22px', color: '#ffffff', fontStyle: 'bold'
+        }).setOrigin(0.5).setDepth(21);
+        this.speedPlusText = this.add.text(btn2X + btnW / 2, btnY + btnH / 2, '+', {
+          fontFamily: '-apple-system, "PingFang SC", "Microsoft YaHei", sans-serif',
+          fontSize: '22px', color: '#ffffff', fontStyle: 'bold'
+        }).setOrigin(0.5).setDepth(21);
+        this.speedLabel = this.add.text(spdLabelX, btnY + btnH / 2, '', {
+          fontFamily: '-apple-system, "PingFang SC", "Microsoft YaHei", sans-serif',
+          fontSize: '14px', color: '#333333', fontStyle: 'bold'
+        }).setOrigin(0, 0.5).setDepth(21);
+      }
+      this.speedMinusText.setPosition(btn1X + btnW / 2, btnY + btnH / 2);
+      this.speedPlusText.setPosition(btn2X + btnW / 2, btnY + btnH / 2);
+      this.speedLabel.setPosition(spdLabelX, btnY + btnH / 2);
+      this.speedLabel.setText('球速: ' + (this.ballSpeedMultiplier * 100) + '%');
+    }
+
+    drawHint(gfx) {
+      if (this.hintTimer <= 0) {
+        if (this.hintText) this.hintText.setAlpha(0);
+        return;
+      }
+      const alpha = Math.min(1, this.hintTimer / 60);
+      if (!this.hintText) {
+        this.hintText = this.add.text(WIDTH / 2, 8, 'WASD 移动   ·   鼠标点击 投球', {
+          fontFamily: '-apple-system, "PingFang SC", "Microsoft YaHei", sans-serif',
+          fontSize: '14px', color: '#999999'
+        }).setOrigin(0.5, 0).setDepth(21);
+      }
+      this.hintText.setAlpha(alpha);
+    }
+
+    drawStartScreen(gfx) {
+      gfx.fillStyle(Phaser.Display.Color.HexStringToColor(COLOR_BG).color, 0.85);
+      gfx.fillRect(0, 0, WIDTH, HEIGHT);
+
+      if (!this.startTitle) {
+        this.startTitle = this.add.text(WIDTH / 2, HEIGHT / 2 - 80, '躲避球', {
+          fontFamily: '-apple-system, "PingFang SC", "Microsoft YaHei", sans-serif',
+          fontSize: '36px', color: COLOR_TEXT, fontStyle: 'bold'
+        }).setOrigin(0.5).setDepth(21);
+        this.startInst1 = this.add.text(WIDTH / 2, HEIGHT / 2 - 30, 'WASD 移动 · 鼠标点击 投球', {
+          fontFamily: '-apple-system, "PingFang SC", "Microsoft YaHei", sans-serif',
+          fontSize: '16px', color: '#555555'
+        }).setOrigin(0.5).setDepth(21);
+        this.startInst2 = this.add.text(WIDTH / 2, HEIGHT / 2 - 5, '2v2 模式: 你 (蓝) + AI 队友 (青) vs 2 个敌方 AI (红/橙)', {
+          fontFamily: '-apple-system, "PingFang SC", "Microsoft YaHei", sans-serif',
+          fontSize: '16px', color: '#555555'
+        }).setOrigin(0.5).setDepth(21);
+      }
+      this.startTitle.setAlpha(1);
+      this.startInst1.setAlpha(1);
+      this.startInst2.setAlpha(1);
+
+      const bw = 180, bh = 48;
+      const bx = WIDTH / 2 - bw / 2, by = HEIGHT / 2 + 30;
+      gfx.fillStyle(COLOR_P1, 1);
+      gfx.fillRoundedRect(bx, by, bw, bh, 8);
+
+      if (!this.startBtnText) {
+        this.startBtnText = this.add.text(WIDTH / 2, by + bh / 2, '点击开始', {
+          fontFamily: '-apple-system, "PingFang SC", "Microsoft YaHei", sans-serif',
+          fontSize: '20px', color: '#ffffff', fontStyle: 'bold'
+        }).setOrigin(0.5).setDepth(21);
+      }
+      this.startBtnText.setPosition(WIDTH / 2, by + bh / 2);
+    }
+
+    drawGameOver(gfx) {
+      gfx.fillStyle(0x000000, 0.55);
+      gfx.fillRect(0, 0, WIDTH, HEIGHT);
+
+      const msg = this.winner === 'player' ? '你赢了!' : '你输了';
+
+      if (!this.gameoverMsg) {
+        this.gameoverMsg = this.add.text(WIDTH / 2, HEIGHT / 2 - 30, msg, {
+          fontFamily: '-apple-system, "PingFang SC", "Microsoft YaHei", sans-serif',
+          fontSize: '48px', color: '#ffffff', fontStyle: 'bold'
+        }).setOrigin(0.5).setDepth(21);
+      }
+      this.gameoverMsg.setText(msg);
+
+      const bw = 160, bh = 44;
+      const bx = WIDTH / 2 - bw / 2, by = HEIGHT / 2 + 20;
+      this.restartBtnBounds = { x: bx, y: by, w: bw, h: bh };
+
+      gfx.fillStyle(COLOR_P1, 1);
+      gfx.fillRoundedRect(bx, by, bw, bh, 8);
+
+      if (!this.restartBtnText) {
+        this.restartBtnText = this.add.text(WIDTH / 2, by + bh / 2, '再来一局', {
+          fontFamily: '-apple-system, "PingFang SC", "Microsoft YaHei", sans-serif',
+          fontSize: '18px', color: '#ffffff', fontStyle: 'bold'
+        }).setOrigin(0.5).setDepth(21);
+      }
+      this.restartBtnText.setPosition(WIDTH / 2, by + bh / 2);
+    }
+
+    destroyUITexts() {
+      const keys = ['speedMinusText', 'speedPlusText', 'speedLabel', 'hintText',
+                      'startTitle', 'startInst1', 'startInst2', 'startBtnText',
+                      'gameoverMsg', 'restartBtnText'];
+      for (const key of keys) {
+        if (this[key]) { this[key].destroy(); this[key] = null; }
+      }
+    }
+  }
+
+  const config = {
+    type: Phaser.AUTO,
+    width: WIDTH,
+    height: HEIGHT,
+    parent: document.body,
+    backgroundColor: '#f5f5f5',
+    physics: {
+      default: 'arcade',
+      arcade: {
+        gravity: { y: 0 },
+        debug: false,
+      }
+    },
+    scene: [BootScene, GameScene],
+    scale: {
+      mode: Phaser.Scale.FIT,
+      autoCenter: Phaser.Scale.CENTER_BOTH,
+    },
+    input: {
+      mouse: true,
+    },
+  };
+
+  const game = new Phaser.Game(config);
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,903 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>躲避球 · Dodgeball — Three.js Edition</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body {
+    min-height: 100%;
+    background: #1a1a1a;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+    color: #eee;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    padding: 16px 0;
+  }
+  h1 { font-size: 18px; font-weight: 500; margin-bottom: 12px; color: #aaa; letter-spacing: 1px; }
+  #game-container {
+    position: relative;
+    width: 800px;
+    height: 500px;
+    border-radius: 8px;
+    overflow: hidden;
+    box-shadow: 0 8px 24px rgba(0,0,0,0.4);
+  }
+  #game-canvas { display: block; width: 800px; height: 500px; cursor: crosshair; }
+  .overlay {
+    position: absolute; top: 0; left: 0; width: 100%; height: 100%;
+    display: flex; flex-direction: column; align-items: center; justify-content: center;
+    background: rgba(0,0,0,0.55); z-index: 10; pointer-events: auto;
+  }
+  .overlay.hidden { display: none; }
+  .overlay h2 { font-size: 32px; font-weight: 700; margin-bottom: 8px; }
+  .overlay .sub { font-size: 16px; color: #ccc; margin-bottom: 20px; }
+  .overlay .hints { font-size: 13px; color: #aaa; margin-bottom: 24px; line-height: 1.6; text-align: center; }
+  .overlay button {
+    padding: 10px 32px; font-size: 16px; border: none; border-radius: 6px;
+    background: #4A90E2; color: #fff; cursor: pointer; transition: background 0.2s;
+  }
+  .overlay button:hover { background: #357ABD; }
+  #start-overlay h2 { color: #4A90E2; }
+  #gameover-overlay h2 { color: #E24A4A; }
+  .hp-bar {
+    position: absolute; width: 40px; height: 5px; border-radius: 2px;
+    background: rgba(0,0,0,0.3); overflow: hidden; z-index: 5; pointer-events: none;
+    transform: translate(-50%, -50%);
+  }
+  .hp-bar-fill { height: 100%; border-radius: 2px; transition: width 0.15s, background 0.15s; }
+  #hint {
+    position: absolute; bottom: 12px; left: 0; right: 0; text-align: center;
+    font-size: 14px; color: #999; pointer-events: none; z-index: 5; transition: opacity 0.3s;
+  }
+  #speed-controls {
+    position: absolute; top: 8px; right: 8px; display: flex; align-items: center; gap: 4px; z-index: 15;
+  }
+  #speed-controls button {
+    width: 28px; height: 28px; border: 1px solid rgba(255,255,255,0.3); border-radius: 4px;
+    background: rgba(0,0,0,0.4); color: #eee; font-size: 14px; font-weight: 700; cursor: pointer;
+  }
+  #speed-controls button:hover { background: rgba(255,255,255,0.15); }
+  #speed-label { font-size: 12px; color: #ccc; min-width: 36px; text-align: center; }
+</style>
+</head>
+<body>
+<div id="game-container">
+  <canvas id="game-canvas"></canvas>
+  <div id="start-overlay" class="overlay">
+    <h2>躲避球 · Dodgeball</h2>
+    <div class="sub">Three.js Edition</div>
+    <div class="hints">WASD 移动 · 鼠标瞄准 + 点击投球<br>2v2: 蓝方(你+盟友) vs 红方(2 AI)</div>
+    <button id="start-btn">点击开始</button>
+  </div>
+  <div id="gameover-overlay" class="overlay hidden">
+    <h2>游戏结束</h2>
+    <div class="sub" id="result-text" style="color:#eee;"></div>
+    <button id="restart-btn">再来一局</button>
+  </div>
+  <div id="hint"></div>
+  <div id="speed-controls">
+    <button id="speed-down">−</button>
+    <span id="speed-label">1.0x</span>
+    <button id="speed-up">+</button>
+  </div>
+</div>
+<script src="https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/cannon@0.6.2/build/cannon.min.js"></script>
+<script>
+(() => {
+
+// ==================== Constants ====================
+const W = 800, H = 500, HW = 400, HH = 250;
+const CHAR_RADIUS = 15, CHAR_SPEED = 4;
+const BALL_RADIUS = 6;
+const PLAYER_BALL_SPEED = 5, AI_BALL_SPEED = 4.8;
+const PLAYER_THROW_COOLDOWN = 15;
+const AI_THROW_INT_MIN = 45, AI_THROW_INT_MAX = 80;
+const BALL_MAX_BOUNCES = 4, MAX_HP = 10;
+const AI_THREAT_RANGE = 200, HINT_FRAMES = 300;
+const OBS_R = 18, OBS_MIN = 3, OBS_MAX = 5, OBS_H = 20;
+const HISTORY_LEN = 6;
+const PERP_DODGE = 1.0, SPEED_THREAT = 2.0;
+const ST_RETREAT = 1, ST_DEFENSIVE = 1.5;
+const AG_IDEAL = 90, DEF_IDEAL = 180;
+const RETREAT_P = 50, RETREAT_A = 750;
+const SPREAD_MIN = 100, SPREAD_F = 0.4, EN_VSPLIT = 120;
+const JITTER_MIN = 2, JITTER_MAX = 12, JITTER_ADAPT = 0.6;
+const C_P1 = 0x4A90E2, C_P2 = 0x3DC1B5, C_AI1 = 0xE24A4A, C_AI2 = 0xE89B3D;
+const C_STR = { p1: '#4A90E2', p2: '#3DC1B5', ai1: '#E24A4A', ai2: '#E89B3D' };
+const C_ROLE = { p1: C_P1, p2: C_P2, ai1: C_AI1, ai2: C_AI2 };
+const HP_G = '#5cd65c', HP_Y = '#f0c040', HP_R = '#e05050';
+const BG = '#f5f5f5', GRID = '#e2e2e2';
+const OBS_COLOR = 0x6B5B4F;
+const G_WALL = 1, G_CHAR = 2, G_BALL = 4, G_OBS = 8;
+
+function tX(cx) { return cx - HW; }
+function tZ(cy) { return cy - HH; }
+function cX(tx) { return tx + HW; }
+function cY(tz) { return tz + HH; }
+
+// ==================== DOM ====================
+const canvas = document.getElementById('game-canvas');
+const startOverlay = document.getElementById('start-overlay');
+const gameoverOverlay = document.getElementById('gameover-overlay');
+const resultText = document.getElementById('result-text');
+const startBtn = document.getElementById('start-btn');
+const restartBtn = document.getElementById('restart-btn');
+const hintEl = document.getElementById('hint');
+const sDown = document.getElementById('speed-down');
+const sUp = document.getElementById('speed-up');
+const sLabel = document.getElementById('speed-label');
+const container = document.getElementById('game-container');
+
+// ==================== Three.js ====================
+const scene = new THREE.Scene();
+const renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
+renderer.setSize(W, H); renderer.setPixelRatio(devicePixelRatio);
+renderer.shadowMap.enabled = true; renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+
+const camera = new THREE.OrthographicCamera(-HW, HW, HH, -HH, 0.1, 1000);
+camera.position.set(0, 400, 200); camera.lookAt(0, 0, 0);
+const camOrig = camera.position.clone();
+
+const dirL = new THREE.DirectionalLight(0xffffff, 1.5);
+dirL.position.set(200, 400, 200); dirL.castShadow = true;
+dirL.shadow.mapSize.set(2048, 2048);
+dirL.shadow.camera.left = -HW; dirL.shadow.camera.right = HW;
+dirL.shadow.camera.top = HH; dirL.shadow.camera.bottom = -HH;
+dirL.shadow.camera.near = 1; dirL.shadow.camera.far = 1000;
+scene.add(dirL);
+scene.add(new THREE.AmbientLight(0x606060, 1.5));
+
+// Ground with grid texture
+const gTex = (() => {
+  const c = document.createElement('canvas'); c.width = W; c.height = H;
+  const t = c.getContext('2d');
+  t.fillStyle = BG; t.fillRect(0, 0, W, H);
+  t.strokeStyle = GRID; t.lineWidth = 1;
+  for (let x = 0; x <= W; x += 50) { t.beginPath(); t.moveTo(x, 0); t.lineTo(x, H); t.stroke(); }
+  for (let y = 0; y <= H; y += 50) { t.beginPath(); t.moveTo(0, y); t.lineTo(W, y); t.stroke(); }
+  return new THREE.CanvasTexture(c);
+})();
+const ground = new THREE.Mesh(
+  new THREE.PlaneGeometry(W, H),
+  new THREE.MeshBasicMaterial({ map: gTex })
+);
+ground.rotation.x = -Math.PI / 2; ground.position.y = -0.01;
+ground.receiveShadow = true; scene.add(ground);
+
+// ==================== Physics ====================
+const world = new CANNON.World();
+world.gravity.set(0, 0, 0);
+world.broadphase = new CANNON.NaiveBroadphase();
+world.defaultContactMaterial.restitution = 1.0;
+
+const wallBodies = [];
+function makeWall(x, z, hw, hd) {
+  const b = new CANNON.Body({ mass: 0 });
+  b.addShape(new CANNON.Box(new CANNON.Vec3(hw, 25, hd)));
+  b.position.set(x, 10, z);
+  b.collisionFilterGroup = G_WALL;
+  b.collisionFilterMask = G_BALL | G_CHAR;
+  world.addBody(b);
+  wallBodies.push(b);
+}
+makeWall(0, -HH - 5, HW + 10, 5);   // N
+makeWall(0, HH + 5, HW + 10, 5);    // S
+makeWall(-HW - 5, 0, 5, HH + 10);   // W
+makeWall(HW + 5, 0, 5, HH + 10);    // E
+
+// ==================== Game state ====================
+const game = {
+  state: 'ready', winner: null, hintTimer: HINT_FRAMES,
+  ballMul: 1.0, effects: [], balls: [], obs: [],
+  players: [], ai: [], shakeTimer: 0, shakeInt: 0,
+};
+// Aliases
+const teamP = () => game.players;
+const teamA = () => game.ai;
+
+// ==================== Geometries ====================
+const geoBody = new THREE.SphereGeometry(CHAR_RADIUS, 24, 16);
+const geoEyeW = new THREE.SphereGeometry(3, 8, 8);
+const geoEyeP = new THREE.SphereGeometry(1.5, 8, 8);
+const geoShadow = new THREE.CircleGeometry(CHAR_RADIUS, 24);
+const geoBall = new THREE.SphereGeometry(BALL_RADIUS, 16, 12);
+const geoParticle = new THREE.SphereGeometry(2.5, 6, 6);
+const geoTrail = new THREE.SphereGeometry(BALL_RADIUS * 0.55, 6, 6);
+const matEyeW = new THREE.MeshPhongMaterial({ color: 0xffffff });
+const matEyeP = new THREE.MeshPhongMaterial({ color: 0x111111 });
+const matShad = new THREE.MeshBasicMaterial({ color: 0x000000, transparent: true, opacity: 0.15, depthWrite: false });
+
+// ==================== Character ====================
+function createChar(cx, cy, colorHex, team, role) {
+  const tx = tX(cx), tz = tZ(cy);
+  const grp = new THREE.Group();
+  grp.position.set(tx, CHAR_RADIUS, tz);
+
+  const bodyMat = new THREE.MeshPhongMaterial({
+    color: colorHex, transparent: true, opacity: 1, depthWrite: true, emissive: 0, shininess: 60
+  });
+  const body = new THREE.Mesh(geoBody, bodyMat);
+  body.castShadow = true; grp.add(body);
+
+  const lw = new THREE.Mesh(geoEyeW, matEyeW);
+  lw.position.set(-5, 6, 10); grp.add(lw);
+  const rw = new THREE.Mesh(geoEyeW, matEyeW);
+  rw.position.set(5, 6, 10); grp.add(rw);
+  const lp = new THREE.Mesh(geoEyeP, matEyeP);
+  lp.position.set(-5, 6, 12); grp.add(lp);
+  const rp = new THREE.Mesh(geoEyeP, matEyeP);
+  rp.position.set(5, 6, 12); grp.add(rp);
+
+  const shad = new THREE.Mesh(geoShadow, matShad);
+  shad.rotation.x = -Math.PI / 2; shad.position.y = -CHAR_RADIUS + 0.02; grp.add(shad);
+
+  scene.add(grp);
+
+  const phys = new CANNON.Body({ mass: 1, linearDamping: 0.99 });
+  phys.addShape(new CANNON.Sphere(CHAR_RADIUS));
+  phys.position.set(tx, CHAR_RADIUS, tz);
+  phys.collisionFilterGroup = G_CHAR;
+  phys.collisionFilterMask = G_WALL | G_CHAR | G_OBS | G_BALL;
+  world.addBody(phys);
+
+  const hpBar = document.createElement('div'); hpBar.className = 'hp-bar';
+  const hpFill = document.createElement('div'); hpFill.className = 'hp-bar-fill';
+  hpFill.style.width = '100%'; hpFill.style.background = HP_G;
+  hpBar.appendChild(hpFill); container.appendChild(hpBar);
+
+  return {
+    grp, body, bodyMat, lp, rp, shad, phys, hpBar, hpFill,
+    role, team, colorHex, hp: MAX_HP, maxHp: MAX_HP,
+    throwCooldown: 0,
+    facingAngle: team === 'player' ? 0 : Math.PI,
+    aiState: 'AGGRESSIVE', aiHoldTimer: 60 + Math.random() * 40,
+    aiWanderAngle: Math.random() * Math.PI * 2, aiWanderTimer: 0,
+    targetIndex: 0, targetHitRates: {},
+    dyingTimer: 0, deathParticles: [], hitFlash: 0, _hist: [],
+  };
+}
+
+// ==================== Ball ====================
+function createBall(thrower, dx, dz, speed) {
+  const p = thrower.phys.position;
+  const bx = p.x + dx * (CHAR_RADIUS + BALL_RADIUS + 2);
+  const bz = p.z + dz * (CHAR_RADIUS + BALL_RADIUS + 2);
+  const tc = thrower.team === 'player' ? C_P1 : C_AI1;
+
+  const mat = new THREE.MeshPhongMaterial({ color: 0xffffff, emissive: tc, emissiveIntensity: 0.5, shininess: 80 });
+  const mesh = new THREE.Mesh(geoBall, mat);
+  const grp = new THREE.Group(); grp.add(mesh);
+  scene.add(grp);
+
+  // Trails
+  const trails = [];
+  for (let i = 0; i < 6; i++) {
+    const tm = new THREE.Mesh(geoTrail, new THREE.MeshBasicMaterial({ color: tc, transparent: true, opacity: 0.3, depthWrite: false }));
+    tm.visible = false; scene.add(tm); trails.push(tm);
+  }
+
+  const phys = new CANNON.Body({ mass: 0.1, linearDamping: 0 });
+  phys.addShape(new CANNON.Sphere(BALL_RADIUS));
+  phys.position.set(bx, BALL_RADIUS, bz);
+  const v = speed * 60 * game.ballMul;
+  phys.velocity.set(dx * v, 0, dz * v);
+  phys.collisionFilterGroup = G_BALL;
+  phys.collisionFilterMask = G_WALL | G_CHAR;  // No G_OBS — obstacle bounce is manual
+  world.addBody(phys);
+
+  const ball = { grp, mesh, mat, phys, trails, trailPos: [], owner: thrower, ownerTeam: thrower.team,
+    bouncesLeft: BALL_MAX_BOUNCES, shouldRemove: false, squashTimer: 0 };
+
+  // Wall/obstacle bounce listener
+  function onCol(e) {
+    if (wallBodies.includes(e.body)) {
+      ball.bouncesLeft--;
+      ball.squashTimer = 0.1;
+      if (ball.bouncesLeft <= 0) ball.shouldRemove = true;
+    }
+  }
+  phys.addEventListener('collide', onCol);
+  ball._wallFn = onCol;
+
+  // Character collision
+  function onChar(e) {
+    if (ball.shouldRemove) return;
+    const all = [...teamP(), ...teamA()];
+    for (const c of all) { if (c.phys === e.body) { onHit(ball, c); return; } }
+  }
+  phys.addEventListener('collide', onChar);
+  ball._charFn = onChar;
+
+  game.balls.push(ball);
+  return ball;
+}
+
+// ==================== Hit ====================
+function onHit(ball, ch) {
+  if (ball.shouldRemove || ball.ownerTeam === ch.team || ch.hp <= 0 || ch.dyingTimer > 0) return;
+  ch.hp--;
+  ch.hitFlash = 0.2;
+  setHP(ch);
+  spawnHit(ch.phys.position.x, ch.phys.position.z, C_STR[ch.role]);
+  if (ball.owner) {
+    const r = ball.owner.targetHitRates;
+    if (!r[ch.role]) r[ch.role] = { hits: 0, total: 0 };
+    r[ch.role].hits++;
+  }
+  ball.shouldRemove = true;
+  if (ch.hp <= 0) { ch.dyingTimer = 0.5; spawnDeath(ch); }
+  if (allDead(teamA())) endGame('player');
+  else if (allDead(teamP())) endGame('ai');
+}
+function allDead(t) { return t.every(c => c.hp <= 0 && !c.dyingTimer); }
+function setHP(ch) {
+  const pct = Math.max(0, ch.hp / ch.maxHp);
+  ch.hpFill.style.width = (pct * 100) + '%';
+  ch.hpFill.style.background = pct > 0.6 ? HP_G : pct > 0.3 ? HP_Y : HP_R;
+}
+
+// ==================== Throw ====================
+function tryThrow(thrower, tx, tz) {
+  if (thrower.throwCooldown > 0) return;
+  const px = thrower.phys.position.x, pz = thrower.phys.position.z;
+  let dx = tx - px, dz = tz - pz;
+  const d = Math.hypot(dx, dz); if (d < 1) return;
+  dx /= d; dz /= d;
+  const spd = thrower.team === 'player' ? PLAYER_BALL_SPEED : AI_BALL_SPEED;
+  createBall(thrower, dx, dz, spd);
+  thrower.throwCooldown = PLAYER_THROW_COOLDOWN;
+  thrower.facingAngle = Math.atan2(dz, dx);
+}
+
+// ==================== Obstacles ====================
+function genObs() {
+  const count = OBS_MIN + Math.floor(Math.random() * (OBS_MAX - OBS_MIN + 1));
+  const shapes = ['circle', 'ellipse', 'rect', 'diamond', 'pentagon'];
+  const spawns = [{ x: 110, y: 180 }, { x: 110, y: 320 }, { x: 690, y: 180 }, { x: 690, y: 320 }];
+  let att = 0;
+  while (game.obs.length < count && att < 400) {
+    att++;
+    const sz = 10 + Math.random() * 18;
+    const cx = 30 + sz + Math.random() * (W - 2 * (30 + sz));
+    const cy = 30 + sz + Math.random() * (H - 2 * (30 + sz));
+    let tc = false;
+    for (const s of spawns) { if (Math.hypot(cx - s.x, cy - s.y) < 130 + sz - 10) { tc = true; break; } }
+    if (tc) continue;
+    let ov = false;
+    for (const o of game.obs) { if (Math.hypot(cx - o.cx, cy - o.cy) < sz + o.size + 15) { ov = true; break; } }
+    if (ov) continue;
+    const sh = shapes[Math.floor(Math.random() * shapes.length)];
+    createObs(cx, cy, sz, sh);
+  }
+}
+
+function createObs(cx, cy, size, shape) {
+  const tx = tX(cx), tz = tZ(cy);
+  const topM = new THREE.MeshPhongMaterial({ color: 0x8B7B6F });
+  const sideM = new THREE.MeshPhongMaterial({ color: 0x5A4A3F });
+  let mesh, hw, hd;
+  switch (shape) {
+    case 'circle': {
+      mesh = new THREE.Mesh(new THREE.CylinderGeometry(size, size, OBS_H, 24), [sideM, topM, topM]);
+      hw = size; hd = size;
+      break;
+    }
+    case 'ellipse': {
+      const r = Math.max(size, 12);
+      mesh = new THREE.Mesh(new THREE.CylinderGeometry(r, r, OBS_H, 24), [sideM, topM, topM]);
+      mesh.scale.set(1.4, 1, 0.8); hw = r * 1.4; hd = r * 0.8;
+      break;
+    }
+    case 'rect': {
+      const w = size * 1.6, d = size * 1.1;
+      mesh = new THREE.Mesh(new THREE.BoxGeometry(w, OBS_H, d), [sideM, sideM, topM, topM, sideM, sideM]);
+      hw = w / 2; hd = d / 2;
+      break;
+    }
+    case 'diamond': {
+      const s = size * 1.2;
+      const s2 = new THREE.Shape();
+      s2.moveTo(0, s); s2.lineTo(s, 0); s2.lineTo(0, -s); s2.lineTo(-s, 0); s2.lineTo(0, s);
+      const eg = new THREE.ExtrudeGeometry(s2, { depth: OBS_H, bevelEnabled: false });
+      mesh = new THREE.Mesh(eg, [topM, sideM]);
+      mesh.rotation.x = -Math.PI / 2; hw = s; hd = s;
+      break;
+    }
+    case 'pentagon': {
+      const r = size;
+      const s2 = new THREE.Shape();
+      for (let i = 0; i < 5; i++) {
+        const a = (Math.PI * 2 / 5) * i - Math.PI / 2;
+        const px = Math.cos(a) * r, py = Math.sin(a) * r;
+        i === 0 ? s2.moveTo(px, py) : s2.lineTo(px, py);
+      }
+      s2.closePath();
+      const eg = new THREE.ExtrudeGeometry(s2, { depth: OBS_H, bevelEnabled: false });
+      mesh = new THREE.Mesh(eg, [topM, sideM]);
+      mesh.rotation.x = -Math.PI / 2; hw = r; hd = r;
+      break;
+    }
+    default: {
+      mesh = new THREE.Mesh(new THREE.CylinderGeometry(size, size, OBS_H, 24), [sideM, topM, topM]);
+      hw = size; hd = size;
+    }
+  }
+  mesh.castShadow = true; mesh.receiveShadow = true;
+  const grp = new THREE.Group(); grp.position.set(tx, 0, tz); grp.add(mesh);
+  scene.add(grp);
+  const phys = new CANNON.Body({ mass: 0 });
+  phys.addShape(new CANNON.Box(new CANNON.Vec3(hw, OBS_H / 2, hd)));
+  phys.position.set(tx, OBS_H / 2, tz);
+  phys.collisionFilterGroup = G_OBS;
+  phys.collisionFilterMask = G_CHAR;  // obstacles only block characters (ball bounce is manual)
+  world.addBody(phys);
+  game.obs.push({ grp, phys, mesh, cx, cy, size, shape, hw, hd });
+}
+
+// ==================== Effects ====================
+function spawnHit(x, z, col) {
+  const pts = [];
+  for (let i = 0; i < 16; i++) {
+    const a = (Math.PI * 2 / 16) * i + Math.random() * 0.3;
+    const spd = 80 + Math.random() * 170;
+    const w = i < 4;
+    const m = new THREE.MeshBasicMaterial({ color: w ? 0xffffff : col, transparent: true, opacity: 1, depthWrite: false });
+    const mesh = new THREE.Mesh(geoParticle, m);
+    mesh.position.set(x, CHAR_RADIUS, z); scene.add(mesh);
+    pts.push({ mesh, m, vx: Math.cos(a) * spd, vz: Math.sin(a) * spd, vy: 60 + Math.random() * 100 });
+  }
+  const ringG = new THREE.RingGeometry(0, 8, 32);
+  const ringM = new THREE.MeshBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.8, depthWrite: false, side: THREE.DoubleSide });
+  const ring = new THREE.Mesh(ringG, ringM);
+  ring.position.set(x, 2, z); ring.rotation.x = -Math.PI / 2; scene.add(ring);
+  game.effects.push({ type: 'hit', pts, ring, ringM, life: 0.4, maxLife: 0.4 });
+  game.shakeTimer = 0.2; game.shakeInt = 4;
+}
+
+function spawnDeath(ch) {
+  const x = ch.phys.position.x, z = ch.phys.position.z;
+  for (let i = 0; i < 12; i++) {
+    const a = (Math.PI * 2 / 12) * i;
+    const spd = 60 + Math.random() * 120;
+    const m = new THREE.MeshBasicMaterial({ color: ch.colorHex, transparent: true, opacity: 1, depthWrite: false });
+    const mesh = new THREE.Mesh(geoParticle, m);
+    mesh.position.set(x, CHAR_RADIUS, z); scene.add(mesh);
+    ch.deathParticles.push({ mesh, m, vx: Math.cos(a) * spd, vz: Math.sin(a) * spd, vy: 40 + Math.random() * 80, life: 0.5, maxLife: 0.5 });
+  }
+}
+
+// ==================== Update ====================
+function updEffects(dt) {
+  for (let i = game.effects.length - 1; i >= 0; i--) {
+    const ef = game.effects[i];
+    ef.life -= dt; const t = 1 - ef.life / ef.maxLife;
+    for (const p of ef.pts) {
+      p.mesh.position.x += p.vx * dt; p.mesh.position.z += p.vz * dt; p.mesh.position.y += p.vy * dt;
+      p.vy -= 300 * dt; p.m.opacity = Math.max(0, 1 - t); p.mesh.scale.setScalar(Math.max(0.1, 1 - t * 0.7));
+    }
+    if (ef.ring) { const s = 1 + t * 4; ef.ring.scale.set(s, s, s); ef.ringM.opacity = Math.max(0, 0.8 * (1 - t)); }
+    if (ef.life <= 0) {
+      for (const p of ef.pts) scene.remove(p.mesh);
+      if (ef.ring) scene.remove(ef.ring);
+      game.effects.splice(i, 1);
+    }
+  }
+}
+
+function updDeath(dt) {
+  const all = [...teamP(), ...teamA()];
+  for (const c of all) {
+    if (c.hitFlash > 0) {
+      c.hitFlash -= dt;
+      c.bodyMat.emissive.setHex(c.hitFlash > 0 ? 0xffffff : 0);
+      c.bodyMat.emissiveIntensity = c.hitFlash > 0 ? Math.min(1, c.hitFlash / 0.2) : 0;
+    }
+    if (c.dyingTimer > 0) {
+      c.dyingTimer -= dt;
+      const p = 1 - c.dyingTimer / 0.5;
+      c.grp.scale.setScalar(Math.max(0.01, 1 - p * 0.7));
+      c.grp.rotation.y += dt * 15;
+      c.bodyMat.opacity = Math.max(0, 1 - p);
+      if (p > 0.3) c.bodyMat.depthWrite = false;
+      for (let j = c.deathParticles.length - 1; j >= 0; j--) {
+        const dp = c.deathParticles[j];
+        dp.life -= dt; dp.mesh.position.x += dp.vx * dt; dp.mesh.position.z += dp.vz * dt;
+        dp.mesh.position.y += dp.vy * dt; dp.vy -= 200 * dt;
+        dp.m.opacity = Math.max(0, dp.life / dp.maxLife);
+        if (dp.life <= 0) { scene.remove(dp.mesh); c.deathParticles.splice(j, 1); }
+      }
+      if (c.dyingTimer <= 0) { c.grp.visible = false; c.hpBar.style.display = 'none'; }
+    }
+  }
+}
+
+function updP1() {
+  const p = teamP()[0];
+  if (!p || p.hp <= 0 || p.dyingTimer > 0) return;
+  let dx = 0, dz = 0;
+  if (keys['KeyW']) dz = -1; if (keys['KeyS']) dz = 1;
+  if (keys['KeyA']) dx = -1; if (keys['KeyD']) dx = 1;
+  const l = Math.hypot(dx, dz);
+  if (l > 0) { dx /= l; dz /= l; }
+  p.phys.velocity.set(dx * CHAR_SPEED * 60, 0, dz * CHAR_SPEED * 60);
+  const adx = aim.x - p.phys.position.x, adz = aim.z - p.phys.position.z;
+  if (Math.hypot(adx, adz) > 1) p.facingAngle = Math.atan2(adz, adx);
+  if (p.throwCooldown > 0) p.throwCooldown--;
+}
+
+// ==================== AI ====================
+function updAI(ai) {
+  if (ai.throwCooldown > 0) ai.throwCooldown--;
+  const ax = ai.phys.position.x, az = ai.phys.position.z;
+  const cxv = cX(ax), cyv = cY(az);
+
+  // Threat assessment
+  let tx = 0, tz = 0, maxT = 0;
+  for (const b of game.balls) {
+    if (b.shouldRemove || b.ownerTeam === ai.team) continue;
+    const bx = b.phys.position.x, bz = b.phys.position.z;
+    const bvx = b.phys.velocity.x, bvz = b.phys.velocity.z;
+    const px24 = cX(bx) + bvx * (24 / 60);
+    const pz24 = cY(bz) + bvz * (24 / 60);
+    const d24 = Math.hypot(px24 - cxv, pz24 - cyv);
+    const dNow = Math.hypot(cX(bx) - cxv, cY(bz) - cyv);
+    if (dNow > AI_THREAT_RANGE * 1.5 && d24 > AI_THREAT_RANGE) continue;
+    const bs = Math.hypot(bvx, bvz) / 60;
+    const sc = Math.max(0, 1 - dNow / (AI_THREAT_RANGE * 1.5)) * bs * SPEED_THREAT;
+    if (sc > maxT) {
+      maxT = sc;
+      const dxa = cxv - cX(bx), dza = cyv - cY(bz);
+      const dl = Math.hypot(dxa, dza) || 1;
+      tx = dxa / dl; tz = dza / dl;
+      tx += -tz * PERP_DODGE; tz += tx * PERP_DODGE;
+      const tl = Math.hypot(tx, tz) || 1; tx /= tl; tz /= tl;
+    }
+  }
+
+  let ideal = AG_IDEAL;
+  if (ai.hp <= ST_RETREAT) ai.aiState = 'RETREAT';
+  else if (maxT > ST_DEFENSIVE) { ai.aiState = 'DEFENSIVE'; ideal = DEF_IDEAL; }
+  else ai.aiState = 'AGGRESSIVE';
+
+  let mx = 0, mz = 0;
+  if (maxT > 0.1) { mx = tx; mz = tz; }
+  else if (ai.aiState === 'RETREAT') {
+    const rg = ai.team === 'player' ? RETREAT_P : RETREAT_A;
+    const ra = rg - cxv, rb = HH - cyv;
+    const rl = Math.hypot(ra, rb) || 1; mx = ra / rl; mz = rb / rl;
+  } else {
+    const en = ai.team === 'player' ? teamA() : teamP();
+    const al = en.filter(e => e.hp > 0 && !e.dyingTimer);
+    if (al.length) {
+      let nn = null, nd = 1/0;
+      for (const e of al) { const d = Math.hypot(cX(e.phys.position.x) - cxv, cY(e.phys.position.z) - cyv); if (d < nd) { nd = d; nn = e; } }
+      if (nn) {
+        const ex = cX(nn.phys.position.x), ez = cY(nn.phys.position.z);
+        const dev = ex - cxv, dez = ez - cyv;
+        const dl = Math.hypot(dev, dez) || 1;
+        if (nd > ideal + 30) { mx = dev / dl; mz = dez / dl; }
+        else if (nd < ideal - 30) { mx = -dev / dl; mz = -dez / dl; }
+        else { ai.aiWanderTimer--; if (ai.aiWanderTimer <= 0) { ai.aiWanderAngle = Math.random() * Math.PI * 2; ai.aiWanderTimer = 30 + Math.random() * 60; } mx = Math.cos(ai.aiWanderAngle); mz = Math.sin(ai.aiWanderAngle); }
+      }
+    }
+  }
+  // Center bias
+  const cdx = HW - cxv, cdz = HH - cyv;
+  if (Math.hypot(cdx, cdz) > 150) { mx += cdx / Math.hypot(cdx, cdz) * 0.3; mz += cdz / Math.hypot(cdx, cdz) * 0.3; }
+  // Team spread
+  const mates = ai.team === 'player' ? teamP() : teamA();
+  for (const t of mates) {
+    if (t === ai) continue;
+    const ttx = cxv - cX(t.phys.position.x), ttz = cyv - cY(t.phys.position.z);
+    const td = Math.hypot(ttx, ttz);
+    if (td < SPREAD_MIN && td > 0) { mx += ttx / td * SPREAD_F; mz += ttz / td * SPREAD_F; }
+  }
+  // Enemy vertical split
+  if (ai.team === 'ai') {
+    const idx = teamA().indexOf(ai);
+    const tz2 = idx === 0 ? HH - EN_VSPLIT : HH + EN_VSPLIT;
+    mz += Math.sign(tz2 - cyv) * 0.3;
+  }
+  const ml = Math.hypot(mx, mz);
+  if (ml > 0) { mx /= ml; mz /= ml; }
+  ai.phys.velocity.set(mx * CHAR_SPEED * 60, 0, mz * CHAR_SPEED * 60);
+  ai.facingAngle = Math.atan2(mz, mx);
+
+  // Throwing
+  ai.aiHoldTimer--;
+  if (ai.aiHoldTimer <= 0 && ai.throwCooldown <= 0) {
+    const en = ai.team === 'player' ? teamA() : teamP();
+    const al = en.filter(e => e.hp > 0 && !e.dyingTimer);
+    if (al.length) {
+      const tgt = pickTgt(ai, al);
+      if (tgt) {
+        let ttx = cX(tgt.phys.position.x), ttz = cY(tgt.phys.position.z);
+        const h = tgt._hist;
+        if (h && h.length >= 2) {
+          const l2 = h[h.length - 1], p2 = h[0];
+          const dvx = l2.x - p2.x, dvz = l2.z - p2.z;
+          const dist = Math.hypot(ttx - cxv, ttz - cyv);
+          const t2 = dist / (AI_BALL_SPEED * 60);
+          ttx += dvx * t2 * 0.5; ttz += dvz * t2 * 0.5;
+        }
+        let jit = JITTER_MIN + Math.random() * (JITTER_MAX - JITTER_MIN);
+        const r2 = ai.targetHitRates[tgt.role];
+        if (r2 && r2.total > 5 && r2.hits / r2.total < JITTER_ADAPT) jit = JITTER_MAX;
+        ttx += (Math.random() - 0.5) * jit * 2; ttz += (Math.random() - 0.5) * jit * 2;
+        tryThrow(ai, tX(ttx), tZ(ttz));
+        ai.aiHoldTimer = AI_THROW_INT_MIN + Math.random() * (AI_THROW_INT_MAX - AI_THROW_INT_MIN);
+        if (!ai.targetHitRates[tgt.role]) ai.targetHitRates[tgt.role] = { hits: 0, total: 0 };
+        ai.targetHitRates[tgt.role].total++;
+      }
+    }
+  }
+  // History
+  ai._hist.push({ x: cxv, z: cyv });
+  if (ai._hist.length > HISTORY_LEN) ai._hist.shift();
+}
+
+function pickTgt(ai, alive) {
+  let idx = ai.targetIndex % alive.length;
+  ai.targetIndex = (idx + 1) % alive.length;
+  return alive[idx];
+}
+
+// ==================== Input ====================
+const keys = {};
+const aim = new THREE.Vector3();
+const mouseNDC = new THREE.Vector2();
+const raycaster = new THREE.Raycaster();
+const gPlane = new THREE.Plane(new THREE.Vector3(0, 1, 0), 0);
+
+window.addEventListener('keydown', e => {
+  keys[e.code] = true;
+  if (['ArrowUp','ArrowDown','ArrowLeft','ArrowRight','Space'].includes(e.code)) e.preventDefault();
+});
+window.addEventListener('keyup', e => { keys[e.code] = false; });
+canvas.addEventListener('mousemove', e => {
+  const r = canvas.getBoundingClientRect();
+  mouseNDC.x = ((e.clientX - r.left) / r.width) * 2 - 1;
+  mouseNDC.y = -((e.clientY - r.top) / r.height) * 2 + 1;
+  raycaster.setFromCamera(mouseNDC, camera);
+  raycaster.ray.intersectPlane(gPlane, aim);
+});
+canvas.addEventListener('click', () => {
+  if (game.state === 'playing') {
+    const p = teamP()[0];
+    if (p && p.hp > 0 && !p.dyingTimer) tryThrow(p, aim.x, aim.z);
+  }
+});
+
+// ==================== Buttons ====================
+startBtn.addEventListener('click', () => startGame());
+restartBtn.addEventListener('click', () => resetGame());
+sDown.addEventListener('click', () => { game.ballMul = Math.max(0.5, game.ballMul - 0.5); sLabel.textContent = game.ballMul.toFixed(1) + 'x'; });
+sUp.addEventListener('click', () => { game.ballMul = Math.min(3.0, game.ballMul + 0.5); sLabel.textContent = game.ballMul.toFixed(1) + 'x'; });
+
+// ==================== Game flow ====================
+function startGame() {
+  game.state = 'playing'; game.hintTimer = HINT_FRAMES;
+  startOverlay.classList.add('hidden'); gameoverOverlay.classList.add('hidden');
+  hintEl.style.opacity = '1';
+}
+
+function endGame(w) {
+  game.state = 'gameover'; game.winner = w;
+  resultText.textContent = w === 'player' ? '蓝方胜利！' : '红方胜利！';
+  gameoverOverlay.classList.remove('hidden');
+}
+
+function resetGame() {
+  // Remove balls
+  for (const b of game.balls) {
+    scene.remove(b.grp); world.remove(b.phys);
+    for (const tm of b.trails) scene.remove(tm);
+  }
+  game.balls = [];
+  // Remove effects
+  for (const ef of game.effects) {
+    for (const p of ef.pts) scene.remove(p.mesh);
+    if (ef.ring) scene.remove(ef.ring);
+  }
+  game.effects = [];
+  // Remove obstacles
+  for (const o of game.obs) { scene.remove(o.grp); world.remove(o.phys); }
+  game.obs = [];
+  // Remove chars
+  for (const c of [...teamP(), ...teamA()]) {
+    scene.remove(c.grp); world.remove(c.phys);
+    if (c.hpBar) c.hpBar.remove();
+  }
+  game.players = []; game.ai = [];
+  // Respawn
+  game.players = [
+    createChar(110, 180, C_P1, 'player', 'p1'),
+    createChar(110, 320, C_P2, 'player', 'p2'),
+  ];
+  game.ai = [
+    createChar(690, 180, C_AI1, 'ai', 'ai1'),
+    createChar(690, 320, C_AI2, 'ai', 'ai2'),
+  ];
+  genObs();
+  game.state = 'ready'; game.winner = null;
+  game.hintTimer = HINT_FRAMES; game.shakeTimer = 0;
+  hintEl.style.opacity = '1';
+  gameoverOverlay.classList.add('hidden');
+  startOverlay.classList.remove('hidden');
+}
+
+// ==================== Sync + Loop ====================
+function sync() {
+  const all = [...teamP(), ...teamA()];
+  for (const c of all) {
+    c.grp.position.set(c.phys.position.x, CHAR_RADIUS, c.phys.position.z);
+    const po = 1.5;
+    c.lp.position.set(-5 + Math.cos(c.facingAngle) * po, 6, 10 + Math.sin(c.facingAngle) * po);
+    c.rp.position.set(5 + Math.cos(c.facingAngle) * po, 6, 10 + Math.sin(c.facingAngle) * po);
+  }
+  for (const b of game.balls) {
+    if (b.shouldRemove) continue;
+    b.grp.position.set(b.phys.position.x, BALL_RADIUS, b.phys.position.z);
+    b.trailPos.unshift({ x: b.phys.position.x, z: b.phys.position.z });
+    if (b.trailPos.length > 6) b.trailPos.pop();
+    for (let i = 0; i < b.trails.length; i++) {
+      if (i < b.trailPos.length) {
+        b.trails[i].visible = true;
+        b.trails[i].position.set(b.trailPos[i].x, BALL_RADIUS, b.trailPos[i].z);
+        b.trails[i].material.opacity = 0.3 * (1 - i / b.trails.length);
+        b.trails[i].scale.setScalar(Math.max(0.1, 1 - i / b.trails.length * 0.7));
+      } else b.trails[i].visible = false;
+    }
+    if (b.squashTimer > 0) {
+      b.squashTimer -= 1/60;
+      const st = Math.max(0, b.squashTimer / 0.1);
+      b.mesh.scale.set(1 + (1 - st) * 0.2, 0.5 + st * 0.5, 1 + (1 - st) * 0.2);
+    } else b.mesh.scale.setScalar(1);
+  }
+}
+
+function updHP() {
+  const all = [...teamP(), ...teamA()];
+  const rect = canvas.getBoundingClientRect();
+  for (const c of all) {
+    if (!c.hpBar) continue;
+    const v = new THREE.Vector3(c.phys.position.x, CHAR_RADIUS * 2 + 8, c.phys.position.z);
+    v.project(camera);
+    c.hpBar.style.left = ((v.x * 0.5 + 0.5) * rect.width - 20) + 'px';
+    c.hpBar.style.top = ((-v.y * 0.5 + 0.5) * rect.height - 8) + 'px';
+  }
+}
+
+function cleanBalls() {
+  for (let i = game.balls.length - 1; i >= 0; i--) {
+    if (game.balls[i].shouldRemove) {
+      const b = game.balls[i];
+      scene.remove(b.grp); world.remove(b.phys);
+      for (const tm of b.trails) scene.remove(tm);
+      game.balls.splice(i, 1);
+    }
+  }
+}
+
+// Manual ball bounce — wall + obstacles (deterministic, like original)
+function updBallBounces() {
+  for (const b of game.balls) {
+    if (b.shouldRemove) continue;
+    const bx = b.phys.position.x, bz = b.phys.position.z;
+    const vx = b.phys.velocity.x, vz = b.phys.velocity.z;
+
+    // Wall bounce
+    if (bx - BALL_RADIUS < -HW) {
+      b.phys.position.x = -HW + BALL_RADIUS;
+      b.phys.velocity.x = Math.abs(vx);
+      b.bouncesLeft--; b.squashTimer = 0.1;
+    } else if (bx + BALL_RADIUS > HW) {
+      b.phys.position.x = HW - BALL_RADIUS;
+      b.phys.velocity.x = -Math.abs(vx);
+      b.bouncesLeft--; b.squashTimer = 0.1;
+    }
+    if (bz - BALL_RADIUS < -HH) {
+      b.phys.position.z = -HH + BALL_RADIUS;
+      b.phys.velocity.z = Math.abs(vz);
+      b.bouncesLeft--; b.squashTimer = 0.1;
+    } else if (bz + BALL_RADIUS > HH) {
+      b.phys.position.z = HH - BALL_RADIUS;
+      b.phys.velocity.z = -Math.abs(vz);
+      b.bouncesLeft--; b.squashTimer = 0.1;
+    }
+
+    // Obstacle bounce
+    for (const o of game.obs) {
+      const ox = o.phys.position.x, oz = o.phys.position.z;
+      let dx = bx - ox, dz = bz - oz;
+      let minD, dist;
+      if (o.shape === 'rect' || o.shape === 'diamond' || o.shape === 'pentagon') {
+        const clX = Math.max(ox - o.hw, Math.min(bx, ox + o.hw));
+        const clZ = Math.max(oz - o.hd, Math.min(bz, oz + o.hd));
+        dx = bx - clX; dz = bz - clZ;
+        dist = Math.hypot(dx, dz);
+        minD = BALL_RADIUS;
+      } else if (o.shape === 'ellipse') {
+        dist = Math.hypot(dx, dz);
+        minD = BALL_RADIUS + (o.hw + o.hd) / 2;
+      } else {
+        dist = Math.hypot(dx, dz);
+        minD = BALL_RADIUS + o.hw;
+      }
+      if (dist < minD) {
+        if (dist > 0.001) {
+          const over = minD - dist;
+          b.phys.position.x += (dx / dist) * over;
+          b.phys.position.z += (dz / dist) * over;
+          const nx = dx / dist, nz = dz / dist;
+          const dot = vx * nx + vz * nz;
+          b.phys.velocity.x -= 2 * dot * nx;
+          b.phys.velocity.z -= 2 * dot * nz;
+        } else {
+          b.phys.velocity.z = -vz;
+        }
+        b.bouncesLeft--; b.squashTimer = 0.1;
+        break;
+      }
+    }
+    if (b.bouncesLeft <= 0) b.shouldRemove = true;
+  }
+}
+
+function updShake(dt) {
+  if (game.shakeTimer > 0) {
+    game.shakeTimer -= dt;
+    const it = game.shakeInt * (game.shakeTimer / 0.2);
+    camera.position.set(camOrig.x + (Math.random() - 0.5) * it, camOrig.y, camOrig.z + (Math.random() - 0.5) * it);
+  } else camera.position.copy(camOrig);
+}
+
+// ==================== Main loop ====================
+const clock = new THREE.Clock();
+function animate() {
+  requestAnimationFrame(animate);
+  const dt = Math.min(clock.getDelta(), 0.05);
+
+  if (game.state === 'playing') {
+    updP1();
+    // Ally = players[1]
+    const ally = teamP()[1];
+    if (ally && ally.hp > 0 && !ally.dyingTimer) updAI(ally);
+    for (const ai of teamA()) { if (ai.hp > 0 || ai.dyingTimer > 0) updAI(ai); }
+    world.step(1/60, dt, 3);
+    updBallBounces();   // manual bounce (walls + obstacles)
+    sync();
+    updEffects(dt);
+    updDeath(dt);
+    cleanBalls();
+    // Hint
+    if (game.hintTimer > 0) {
+      game.hintTimer--;
+      hintEl.textContent = 'WASD移动 · 鼠标瞄准+点击投球';
+      if (game.hintTimer <= 0) hintEl.style.opacity = '0';
+      else if (game.hintTimer < 60) hintEl.style.opacity = (game.hintTimer / 60).toString();
+    }
+    // End checks after death animations fully complete
+    let allDone = true;
+    for (const c of teamA()) { if (c.hp > 0 || c.dyingTimer > 0) { allDone = false; break; } }
+    if (allDone) endGame('player');
+    allDone = true;
+    for (const c of teamP()) { if (c.hp > 0 || c.dyingTimer > 0) { allDone = false; break; } }
+    if (allDone) endGame('ai');
+  }
+  updHP();
+  updShake(dt);
+  renderer.render(scene, camera);
+}
+
+// ==================== Boot ====================
+resetGame();
+animate();
+})();
+</script>
+</body>
+</html>

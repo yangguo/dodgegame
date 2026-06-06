@@ -1,0 +1,13 @@
+# Editor & IDE
+.vscode/
+.idea/
+*.sublime-project
+*.sublime-workspace
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Project-local Superpowers & Claude state
+.claude/
+.superpowers/
