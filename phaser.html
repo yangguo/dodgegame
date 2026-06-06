@@ -32,6 +32,77 @@
 (() => {
   'use strict';
 
+  // ---------- Sound Engine ----------
+  const snd = (() => {
+    let ctx = null, lastBounce = 0, enabled = true;
+    function c() { try { if (!ctx) ctx = new (window.AudioContext||window.webkitAudioContext)(); if (ctx.state==='suspended') ctx.resume(); return ctx; } catch(e) { return null; } }
+    const ok = (fn) => { if (!enabled) return; try { fn(); } catch(e) {} };
+    return {
+      init() { if (enabled) c(); },
+      isEnabled() { return enabled; },
+      setEnabled(value) { enabled = !!value; },
+      toggle() { enabled = !enabled; return enabled; },
+      playStart() { ok(() => { const x = c(); if (!x) return; const t = x.currentTime;
+        [0,0.1,0.2].forEach((d,i) => { const o = x.createOscillator(), g = x.createGain(); o.type = 'sine';
+        o.frequency.setValueAtTime([523,659,784][i], t+d); g.gain.setValueAtTime(0.1, t+d);
+        g.gain.linearRampToValueAtTime(0, t+d+0.15); o.connect(g); g.connect(x.destination);
+        o.start(t+d); o.stop(t+d+0.2); }); }); },
+      playWin() { ok(() => { const x = c(); if (!x) return; const t = x.currentTime;
+        [0,0.15,0.3].forEach((d,i) => { const o = x.createOscillator(), g = x.createGain(); o.type = 'sine';
+        o.frequency.setValueAtTime([523,659,784][i], t+d); g.gain.setValueAtTime(0.15, t+d);
+        g.gain.linearRampToValueAtTime(0, t+d+0.35); o.connect(g); g.connect(x.destination);
+        o.start(t+d); o.stop(t+d+0.4); }); }); },
+      playLose() { ok(() => { const x = c(); if (!x) return; const t = x.currentTime;
+        [0,0.2].forEach((d,i) => { const o = x.createOscillator(), g = x.createGain(); o.type = 'sine';
+        o.frequency.setValueAtTime([400,200][i], t+d); o.frequency.linearRampToValueAtTime([200,100][i], t+d+0.35);
+        g.gain.setValueAtTime(0.12, t+d); g.gain.linearRampToValueAtTime(0, t+d+0.35);
+        o.connect(g); g.connect(x.destination); o.start(t+d); o.stop(t+d+0.4); }); }); },
+      playThrow() { ok(() => { const x = c(); if (!x) return; const t = x.currentTime;
+        const o = x.createOscillator(), g = x.createGain(); o.type = 'sine';
+        o.frequency.setValueAtTime(200, t); o.frequency.linearRampToValueAtTime(600, t+0.15);
+        g.gain.setValueAtTime(0.12, t); g.gain.linearRampToValueAtTime(0, t+0.15);
+        o.connect(g); g.connect(x.destination); o.start(t); o.stop(t+0.17); }); },
+      playHit() { ok(() => { const x = c(); if (!x) return; const t = x.currentTime;
+        const o = x.createOscillator(), g = x.createGain(); o.type = 'sine';
+        o.frequency.setValueAtTime(100, t); g.gain.setValueAtTime(0.18, t);
+        g.gain.linearRampToValueAtTime(0, t+0.2); o.connect(g); g.connect(x.destination);
+        o.start(t); o.stop(t+0.22);
+        if (x.sampleRate) { const L = Math.ceil(x.sampleRate*0.15), B = x.createBuffer(1,L,x.sampleRate);
+        for (let i=0;i<L;i++) B.getChannelData(0)[i] = Math.random()*2-1;
+        const s = x.createBufferSource(); s.buffer = B;
+        const gn = x.createGain(), f = x.createBiquadFilter(); f.type = 'bandpass';
+        f.frequency.setValueAtTime(300, t); f.Q.setValueAtTime(1, t);
+        gn.gain.setValueAtTime(0.1, t); gn.gain.linearRampToValueAtTime(0, t+0.15);
+        s.connect(f); f.connect(gn); gn.connect(x.destination); s.start(t); s.stop(t+0.17); }
+      }); },
+      playDeath() { ok(() => { const x = c(); if (!x) return; const t = x.currentTime;
+        const o = x.createOscillator(), g = x.createGain(); o.type = 'sine';
+        o.frequency.setValueAtTime(400, t); o.frequency.linearRampToValueAtTime(80, t+0.5);
+        g.gain.setValueAtTime(0.15, t); g.gain.linearRampToValueAtTime(0, t+0.5);
+        o.connect(g); g.connect(x.destination); o.start(t); o.stop(t+0.52);
+        if (x.sampleRate) { const L = Math.ceil(x.sampleRate*0.3), B = x.createBuffer(1,L,x.sampleRate);
+        for (let i=0;i<L;i++) B.getChannelData(0)[i] = Math.random()*2-1;
+        const s = x.createBufferSource(); s.buffer = B;
+        const gn = x.createGain(), f = x.createBiquadFilter(); f.type = 'bandpass';
+        f.frequency.setValueAtTime(200, t); f.Q.setValueAtTime(0.5, t);
+        gn.gain.setValueAtTime(0.12, t); gn.gain.linearRampToValueAtTime(0, t+0.3);
+        s.connect(f); f.connect(gn); gn.connect(x.destination); s.start(t); s.stop(t+0.32); }
+      }); },
+      playBounce() { if (Date.now()-lastBounce<50) return; lastBounce = Date.now();
+        ok(() => { const x = c(); if (!x) return; const t = x.currentTime;
+        const o = x.createOscillator(), g = x.createGain(); o.type = 'sine';
+        o.frequency.setValueAtTime(800, t); g.gain.setValueAtTime(0.06, t);
+        g.gain.linearRampToValueAtTime(0, t+0.08); o.connect(g); g.connect(x.destination);
+        o.start(t); o.stop(t+0.1); }); },
+      playObsBounce() { if (Date.now()-lastBounce<50) return; lastBounce = Date.now();
+        ok(() => { const x = c(); if (!x) return; const t = x.currentTime;
+        const o = x.createOscillator(), g = x.createGain(); o.type = 'sine';
+        o.frequency.setValueAtTime(600, t); g.gain.setValueAtTime(0.04, t);
+        g.gain.linearRampToValueAtTime(0, t+0.06); o.connect(g); g.connect(x.destination);
+        o.start(t); o.stop(t+0.08); }); },
+    };
+  })();
+
   // ---------- Constants ----------
   const WIDTH = 800;
   const HEIGHT = 500;
@@ -150,6 +221,10 @@
       this.speedMinusText = null;
       this.speedPlusText = null;
       this.speedLabel = null;
+      this.pauseText = null;
+      this.soundText = null;
+      this.pauseTitle = null;
+      this.pauseSub = null;
       this.hintText = null;
       this.startTitle = null;
       this.startInst1 = null;
@@ -160,12 +235,29 @@
 
       this.speedDownBtn = null;
       this.speedUpBtn = null;
+      this.pauseBtn = null;
+      this.soundBtn = null;
       this.restartBtnBounds = null;
 
       // Pointer handler
       this.input.on('pointerdown', (pointer) => {
         const px = pointer.x;
         const py = pointer.y;
+
+        if (this.pauseBtn) {
+          const b = this.pauseBtn;
+          if (px >= b.x && px <= b.x + b.w && py >= b.y && py <= b.y + b.h) {
+            this.togglePause();
+            return;
+          }
+        }
+        if (this.soundBtn) {
+          const b = this.soundBtn;
+          if (px >= b.x && px <= b.x + b.w && py >= b.y && py <= b.y + b.h) {
+            this.toggleSound();
+            return;
+          }
+        }
 
         if (this.speedDownBtn) {
           const b = this.speedDownBtn;
@@ -183,6 +275,7 @@
         }
 
         if (this.gameState === 'ready') {
+          snd.init();
           this.startGame();
         } else if (this.gameState === 'playing') {
           const p1 = this.teamPlayer[0];
@@ -197,8 +290,18 @@
         }
       });
 
-      this.input.keyboard.on('keydown', () => {
-        if (this.gameState === 'ready') this.startGame();
+      this.input.keyboard.on('keydown', (event) => {
+        if (event.code === 'KeyM') {
+          event.preventDefault();
+          this.toggleSound();
+          return;
+        }
+        if (event.code === 'KeyP' && (this.gameState === 'playing' || this.gameState === 'paused')) {
+          event.preventDefault();
+          this.togglePause();
+          return;
+        }
+        if (this.gameState === 'ready') { snd.init(); this.startGame(); }
       });
 
       // Listen for world bounds events (for ball bounce counting)
@@ -208,6 +311,7 @@
           let bl = go.getData('bouncesLeft');
           if (bl === undefined) return;  // ball may have been destroyed
           bl--;
+          snd.playBounce();
           go.setData('bouncesLeft', bl);
           if (bl <= 0) {
             go.setData('shouldRemove', true);
@@ -230,8 +334,9 @@
       sprite.body.setAllowGravity(false, false);
       sprite.body.setBounce(0, 0);
       sprite.body.setImmovable(false);
-      // Drag so chars stop when no input
-      sprite.body.setDrag(8000);
+      // Movement is explicitly driven every frame via setVelocity(…),
+      // so keeping drag at zero avoids unintended speed suppression.
+      sprite.body.setDrag(0);
       sprite.body.setMaxSpeed(CHAR_SPEED * 60 * 1.1);
 
       sprite.setData('team', team);
@@ -309,13 +414,18 @@
       this.winner = null;
       this.hintTimer = HINT_FRAMES;
       this.restartBtnBounds = null;
+      this.pauseBtn = null;
+      this.soundBtn = null;
       this.speedDownBtn = null;
       this.speedUpBtn = null;
+      this.physics.pause();
       // Show start screen text, hide game over text
       if (this.startTitle) this.startTitle.setAlpha(1);
       if (this.startInst1) this.startInst1.setAlpha(1);
       if (this.startInst2) this.startInst2.setAlpha(1);
       if (this.startBtnText) this.startBtnText.setAlpha(1);
+      if (this.pauseTitle) this.pauseTitle.setAlpha(0);
+      if (this.pauseSub) this.pauseSub.setAlpha(0);
       if (this.gameoverMsg) this.gameoverMsg.setAlpha(0);
       if (this.restartBtnText) this.restartBtnText.setAlpha(0);
     }
@@ -323,14 +433,35 @@
     startGame() {
       this.gameState = 'playing';
       this.hintTimer = HINT_FRAMES;
+      this.physics.resume();
       // Hide start screen text elements
       if (this.startTitle) this.startTitle.setAlpha(0);
       if (this.startInst1) this.startInst1.setAlpha(0);
       if (this.startInst2) this.startInst2.setAlpha(0);
       if (this.startBtnText) this.startBtnText.setAlpha(0);
+      if (this.pauseTitle) this.pauseTitle.setAlpha(0);
+      if (this.pauseSub) this.pauseSub.setAlpha(0);
       // Hide game over screen if visible
       if (this.gameoverMsg) this.gameoverMsg.setAlpha(0);
       if (this.restartBtnText) this.restartBtnText.setAlpha(0);
+      snd.playStart();
+    }
+
+    togglePause() {
+      if (this.gameState === 'playing') {
+        this.gameState = 'paused';
+        this.physics.pause();
+      } else if (this.gameState === 'paused') {
+        this.gameState = 'playing';
+        this.hintTimer = HINT_FRAMES;
+        this.physics.resume();
+        if (this.pauseTitle) this.pauseTitle.setAlpha(0);
+        if (this.pauseSub) this.pauseSub.setAlpha(0);
+      }
+    }
+
+    toggleSound() {
+      snd.toggle();
     }
 
     // ---- Obstacle generation ----
@@ -470,12 +601,9 @@
       ball.setDepth(5);
       ball.body.setAllowGravity(false, false);
       ball.body.setCircle(BALL_RADIUS, 0, 0);
-      ball.setCollideWorldBounds(true);
+      ball.setCollideWorldBounds(false);
       ball.body.setBounce(1, 1);
-      ball.body.onWorldBounds = true;
-
-      const speedMul = this.ballSpeedMultiplier;
-      ball.setVelocity(ndx * speed * 60 * speedMul, ndy * speed * 60 * speedMul);
+      ball.body.onWorldBounds = false;
 
       ball.setData('isBall', true);
       ball.setData('owner', thrower);
@@ -483,8 +611,15 @@
       ball.setData('bouncesLeft', BALL_MAX_BOUNCES);
       ball.setData('trail', []);
       ball.setData('shouldRemove', false);
+      ball.setData('previousX', bx);
+      ball.setData('previousY', by);
 
       this.ballsGroup.add(ball);
+      const speedMul = this.ballSpeedMultiplier;
+      // Apply launch velocity after adding to the physics group so it isn't
+      // overridden by group defaults.
+      ball.setVelocity(ndx * speed * 60 * speedMul, ndy * speed * 60 * speedMul);
+      snd.playThrow();
       thrower.setData('throwCooldown', PLAYER_THROW_COOLDOWN);
       thrower.setData('facingAngle', Math.atan2(ndy, ndx));
     }
@@ -522,6 +657,7 @@
 
       let hp = char.getData('hp');
       hp = Math.max(0, hp - 1);
+      snd.playHit();
       char.setData('hp', hp);
 
       const colorStr = ROLE_COLOR_STR[char.getData('role')] || COLOR_P1_STR;
@@ -540,6 +676,7 @@
       ball.setData('shouldRemove', true);
 
       if (hp <= 0) {
+        snd.playDeath();
         char.setData('dyingTimer', 30);
         char.setVisible(false);
         const particles = [];
@@ -568,8 +705,12 @@
     }
 
     endGame(winner) {
+      if (winner === 'player') snd.playWin(); else snd.playLose();
       this.gameState = 'gameover';
       this.winner = winner;
+      this.physics.pause();
+      if (this.pauseTitle) this.pauseTitle.setAlpha(0);
+      if (this.pauseSub) this.pauseSub.setAlpha(0);
       // Ensure game over text is visible
       if (this.gameoverMsg) this.gameoverMsg.setAlpha(1);
       if (this.restartBtnText) this.restartBtnText.setAlpha(1);
@@ -917,54 +1058,147 @@
       if (c.y > HEIGHT - half) c.y = HEIGHT - half;
     }
 
-    // ---- Ball manual obstacle bounce ----
-    updateBallObstacleCollisions() {
+    moveBallTo(ball, x, y) {
+      ball.setPosition(x, y);
+      if (ball.body && ball.body.updateFromGameObject) {
+        ball.body.updateFromGameObject();
+      }
+    }
+
+    decrementBallBounces(ball) {
+      let bouncesLeft = ball.getData('bouncesLeft');
+      if (bouncesLeft === undefined) return;
+      bouncesLeft--;
+      ball.setData('bouncesLeft', bouncesLeft);
+      if (bouncesLeft <= 0) ball.setData('shouldRemove', true);
+    }
+
+    getObstacleContact(x, y, obstacle) {
+      const or = obstacle.size;
+      let minD, dist;
+      let ddx = x - obstacle.x, ddy = y - obstacle.y;
+
+      if (obstacle.shape === 'rect' || obstacle.shape === 'diamond' || obstacle.shape === 'pentagon') {
+        const ow = obstacle.width, oh = obstacle.height;
+        const closestX = Math.max(obstacle.x - ow / 2, Math.min(x, obstacle.x + ow / 2));
+        const closestY = Math.max(obstacle.y - oh / 2, Math.min(y, obstacle.y + oh / 2));
+        ddx = x - closestX; ddy = y - closestY;
+        dist = Math.hypot(ddx, ddy);
+        minD = BALL_RADIUS;
+        if (dist <= 0.001 &&
+            x >= obstacle.x - ow / 2 && x <= obstacle.x + ow / 2 &&
+            y >= obstacle.y - oh / 2 && y <= obstacle.y + oh / 2) {
+          const toLeft = x - (obstacle.x - ow / 2);
+          const toRight = (obstacle.x + ow / 2) - x;
+          const toTop = y - (obstacle.y - oh / 2);
+          const toBottom = (obstacle.y + oh / 2) - y;
+          const minSide = Math.min(toLeft, toRight, toTop, toBottom);
+          if (minSide === toLeft) return { hit: true, nx: -1, ny: 0, overlap: toLeft + BALL_RADIUS };
+          if (minSide === toRight) return { hit: true, nx: 1, ny: 0, overlap: toRight + BALL_RADIUS };
+          if (minSide === toTop) return { hit: true, nx: 0, ny: -1, overlap: toTop + BALL_RADIUS };
+          return { hit: true, nx: 0, ny: 1, overlap: toBottom + BALL_RADIUS };
+        }
+      } else if (obstacle.shape === 'ellipse') {
+        const avgRad = (obstacle.width + obstacle.height) / 2;
+        dist = Math.hypot(ddx, ddy);
+        minD = BALL_RADIUS + avgRad;
+      } else {
+        dist = Math.hypot(ddx, ddy);
+        minD = BALL_RADIUS + or;
+      }
+
+      if (dist < minD) {
+        return {
+          hit: true,
+          ddx,
+          ddy,
+          dist,
+          minD,
+          nx: dist > 0.001 ? ddx / dist : 0,
+          ny: dist > 0.001 ? ddy / dist : 0,
+          overlap: minD - dist,
+        };
+      }
+      return { hit: false, ddx, ddy, dist, minD, nx: 0, ny: 0, overlap: 0 };
+    }
+
+    findObstacleCollision(ball, obstacle, previousX, previousY) {
+      const travel = Math.hypot(ball.x - previousX, ball.y - previousY);
+      const steps = Math.max(1, Math.ceil(travel / (BALL_RADIUS * 0.75)));
+      for (let i = 1; i <= steps; i++) {
+        const t = i / steps;
+        const x = previousX + (ball.x - previousX) * t;
+        const y = previousY + (ball.y - previousY) * t;
+        const contact = this.getObstacleContact(x, y, obstacle);
+        if (contact.hit) return { ...contact, x, y };
+      }
+      return null;
+    }
+
+    reflectBallVelocity(ball, nx, ny) {
+      const vx = ball.body.velocity.x;
+      const vy = ball.body.velocity.y;
+      const dot = vx * nx + vy * ny;
+      ball.setVelocity(vx - 2 * dot * nx, vy - 2 * dot * ny);
+    }
+
+    // ---- Ball manual wall + obstacle bounce ----
+    updateBallBounces() {
       const balls = this.ballsGroup.getChildren();
       for (const b of balls) {
         if (!b.active || b.getData('shouldRemove')) continue;
 
+        const previousX = b.getData('previousX') ?? b.x;
+        const previousY = b.getData('previousY') ?? b.y;
+        let wallBounced = false;
+
+        if (b.x - BALL_RADIUS < 0) {
+          this.moveBallTo(b, BALL_RADIUS, b.y);
+          b.setVelocity(Math.abs(b.body.velocity.x), b.body.velocity.y);
+          wallBounced = true;
+        } else if (b.x + BALL_RADIUS > WIDTH) {
+          this.moveBallTo(b, WIDTH - BALL_RADIUS, b.y);
+          b.setVelocity(-Math.abs(b.body.velocity.x), b.body.velocity.y);
+          wallBounced = true;
+        }
+
+        if (b.y - BALL_RADIUS < 0) {
+          this.moveBallTo(b, b.x, BALL_RADIUS);
+          b.setVelocity(b.body.velocity.x, Math.abs(b.body.velocity.y));
+          wallBounced = true;
+        } else if (b.y + BALL_RADIUS > HEIGHT) {
+          this.moveBallTo(b, b.x, HEIGHT - BALL_RADIUS);
+          b.setVelocity(b.body.velocity.x, -Math.abs(b.body.velocity.y));
+          wallBounced = true;
+        }
+
+        if (wallBounced) {
+          snd.playBounce();
+          this.decrementBallBounces(b);
+        }
+
         for (const o of this.obstacleData) {
-          const or = o.size;
-          let minD, dist;
-          let ddx = b.x - o.x, ddy = b.y - o.y;
-
-          if (o.shape === 'rect' || o.shape === 'diamond' || o.shape === 'pentagon') {
-            const ow = o.width, oh = o.height;
-            const closestX = Math.max(o.x - ow / 2, Math.min(b.x, o.x + ow / 2));
-            const closestY = Math.max(o.y - oh / 2, Math.min(b.y, o.y + oh / 2));
-            ddx = b.x - closestX; ddy = b.y - closestY;
-            dist = Math.hypot(ddx, ddy);
-            minD = BALL_RADIUS;
-          } else if (o.shape === 'ellipse') {
-            const avgRad = (o.width + o.height) / 2;
-            dist = Math.hypot(ddx, ddy);
-            minD = BALL_RADIUS + avgRad;
-          } else {
-            dist = Math.hypot(ddx, ddy);
-            minD = BALL_RADIUS + or;
-          }
-
-          if (dist < minD) {
-            if (dist > 0.001) {
-              const overlap = minD - dist;
-              b.x += (ddx / dist) * overlap;
-              b.y += (ddy / dist) * overlap;
-              const nx = ddx / dist;
-              const ny = ddy / dist;
+          const contact = this.findObstacleCollision(b, o, previousX, previousY);
+          if (contact) {
+            snd.playObsBounce();
+            let nx = contact.nx;
+            let ny = contact.ny;
+            if (Math.hypot(nx, ny) <= 0.001) {
               const vx = b.body.velocity.x;
               const vy = b.body.velocity.y;
-              const dot = (vx / 60 * nx + vy / 60 * ny);
-              b.setVelocity(vx - 2 * dot * nx * 60, vy - 2 * dot * ny * 60);
-            } else {
-              b.setVelocity(b.body.velocity.x, -b.body.velocity.y);
+              const speed = Math.hypot(vx, vy) || 1;
+              nx = -vx / speed;
+              ny = -vy / speed;
             }
-            let bl = b.getData('bouncesLeft');
-            bl--;
-            b.setData('bouncesLeft', bl);
-            if (bl <= 0) b.setData('shouldRemove', true);
+            this.moveBallTo(b, contact.x + nx * contact.overlap, contact.y + ny * contact.overlap);
+            this.reflectBallVelocity(b, nx, ny);
+            this.decrementBallBounces(b);
             break;
           }
         }
+
+        b.setData('previousX', b.x);
+        b.setData('previousY', b.y);
       }
     }
 
@@ -1026,7 +1260,7 @@
         this.updateP1();
         this.updateAlly();
         for (const ai of this.teamAI) this.updateAIChar(ai);
-        this.updateBallObstacleCollisions();
+        this.updateBallBounces();
         this.updateBallTrails();
         this.updateEffects();
         this.updateDeathAnimations();
@@ -1050,10 +1284,46 @@
       for (let x = 40; x < WIDTH; x += 40) gfx.lineBetween(x + 0.5, 0, x + 0.5, HEIGHT);
       for (let y = 40; y < HEIGHT; y += 40) gfx.lineBetween(0, y + 0.5, WIDTH, y + 0.5);
 
-      // Obstacle shadows
+      // Obstacles (bodies + shadows)
       for (const o of this.obstacleData) {
+        // Shadow
         gfx.fillStyle(0x000000, 0.15);
         gfx.fillEllipse(o.x, o.y + o.size + 3, o.size * 0.85 * 2, 3.5 * 2);
+        // Body
+        const oColor = Phaser.Display.Color.HexStringToColor(o.color).color;
+        gfx.fillStyle(oColor, 1);
+        gfx.lineStyle(1.5, 0x4a3d33, 1);
+        if (o.shape === 'circle') {
+          gfx.fillCircle(o.x, o.y, o.size);
+          gfx.strokeCircle(o.x, o.y, o.size);
+        } else if (o.shape === 'ellipse') {
+          gfx.fillEllipse(o.x, o.y, o.width, o.height);
+          gfx.strokeEllipse(o.x, o.y, o.width, o.height);
+        } else if (o.shape === 'rect') {
+          gfx.fillRect(o.x - o.width / 2, o.y - o.height / 2, o.width, o.height);
+          gfx.strokeRect(o.x - o.width / 2, o.y - o.height / 2, o.width, o.height);
+        } else if (o.shape === 'diamond') {
+          gfx.fillPoints([
+            { x: o.x, y: o.y - o.height / 2 },
+            { x: o.x + o.width / 2, y: o.y },
+            { x: o.x, y: o.y + o.height / 2 },
+            { x: o.x - o.width / 2, y: o.y },
+          ], true);
+          gfx.strokePoints([
+            { x: o.x, y: o.y - o.height / 2 },
+            { x: o.x + o.width / 2, y: o.y },
+            { x: o.x, y: o.y + o.height / 2 },
+            { x: o.x - o.width / 2, y: o.y },
+          ], true);
+        } else if (o.shape === 'pentagon') {
+          const pts = [];
+          for (let i = 0; i < 5; i++) {
+            const a = Math.PI / 2 + (i * 2 * Math.PI) / 5;
+            pts.push({ x: o.x + Math.cos(a) * o.size, y: o.y - Math.sin(a) * o.size });
+          }
+          gfx.fillPoints(pts, true);
+          gfx.strokePoints(pts, true);
+        }
       }
 
       // Characters
@@ -1067,15 +1337,21 @@
       // Effects
       this.drawEffects(gfx);
 
-      // Speed controls
-      this.drawSpeedControls(gfx);
-
       // Hint
       this.drawHint(gfx);
 
       // Start / Game over
       if (this.gameState === 'ready') this.drawStartScreen(gfx);
+      else if (this.gameState === 'paused') this.drawPauseOverlay(gfx);
       else if (this.gameState === 'gameover') this.drawGameOver(gfx);
+
+      if (this.gameState !== 'paused') {
+        if (this.pauseTitle) this.pauseTitle.setAlpha(0);
+        if (this.pauseSub) this.pauseSub.setAlpha(0);
+      }
+
+      // Top controls stay visible above overlays.
+      this.drawTopControls(gfx);
     }
 
     drawCharacter(sprite, gfx) {
@@ -1119,6 +1395,11 @@
       // Shadow
       gfx.fillStyle(0x000000, 0.12);
       gfx.fillEllipse(cx, cy + CHAR_SIZE / 2 + 2, CHAR_SIZE * 0.45 * 2, 4 * 2);
+
+      // Body
+      const half = CHAR_SIZE / 2;
+      gfx.fillStyle(colorNum, 1);
+      gfx.fillRoundedRect(cx - half, cy - half, CHAR_SIZE, CHAR_SIZE, 8);
 
       // Eyes
       const facingAngle = sprite.getData('facingAngle') || 0;
@@ -1207,6 +1488,42 @@
       }
     }
 
+    drawTopControls(gfx) {
+      this.drawPauseSoundControls(gfx);
+      this.drawSpeedControls(gfx);
+    }
+
+    drawPauseSoundControls(gfx) {
+      const btnH = 32, gap = 8, btnY = 12;
+      this.pauseBtn = { x: 12, y: btnY, w: 64, h: btnH };
+      this.soundBtn = { x: this.pauseBtn.x + this.pauseBtn.w + gap, y: btnY, w: 78, h: btnH };
+
+      const pauseColor = this.gameState === 'ready' || this.gameState === 'gameover' ? 0x718096 : 0x4a5568;
+      const soundColor = snd.isEnabled() ? 0x2f855a : 0x805ad5;
+      gfx.fillStyle(pauseColor, 1);
+      gfx.fillRoundedRect(this.pauseBtn.x, this.pauseBtn.y, this.pauseBtn.w, this.pauseBtn.h, 6);
+      gfx.fillStyle(soundColor, 1);
+      gfx.fillRoundedRect(this.soundBtn.x, this.soundBtn.y, this.soundBtn.w, this.soundBtn.h, 6);
+
+      if (!this.pauseText) {
+        this.pauseText = this.add.text(0, 0, '', {
+          fontFamily: '-apple-system, "PingFang SC", "Microsoft YaHei", sans-serif',
+          fontSize: '14px', color: '#ffffff', fontStyle: 'bold'
+        }).setOrigin(0.5).setDepth(21);
+        this.soundText = this.add.text(0, 0, '', {
+          fontFamily: '-apple-system, "PingFang SC", "Microsoft YaHei", sans-serif',
+          fontSize: '14px', color: '#ffffff', fontStyle: 'bold'
+        }).setOrigin(0.5).setDepth(21);
+      }
+
+      this.pauseText.setPosition(this.pauseBtn.x + this.pauseBtn.w / 2, this.pauseBtn.y + this.pauseBtn.h / 2);
+      this.pauseText.setText(this.gameState === 'paused' ? '继续' : '暂停');
+      this.pauseText.setAlpha(1);
+      this.soundText.setPosition(this.soundBtn.x + this.soundBtn.w / 2, this.soundBtn.y + this.soundBtn.h / 2);
+      this.soundText.setText(snd.isEnabled() ? '声音 开' : '声音 关');
+      this.soundText.setAlpha(1);
+    }
+
     drawSpeedControls(gfx) {
       const btnW = 40, btnH = 32, gap = 8, btnY = 12, btnStartX = WIDTH - 200;
       const btn1X = btnStartX, btn2X = btnStartX + btnW + gap;
@@ -1237,6 +1554,24 @@
       this.speedPlusText.setPosition(btn2X + btnW / 2, btnY + btnH / 2);
       this.speedLabel.setPosition(spdLabelX, btnY + btnH / 2);
       this.speedLabel.setText('球速: ' + (this.ballSpeedMultiplier * 100) + '%');
+    }
+
+    drawPauseOverlay(gfx) {
+      gfx.fillStyle(0x000000, 0.45);
+      gfx.fillRect(0, 0, WIDTH, HEIGHT);
+
+      if (!this.pauseTitle) {
+        this.pauseTitle = this.add.text(WIDTH / 2, HEIGHT / 2 - 20, '已暂停', {
+          fontFamily: '-apple-system, "PingFang SC", "Microsoft YaHei", sans-serif',
+          fontSize: '42px', color: '#ffffff', fontStyle: 'bold'
+        }).setOrigin(0.5).setDepth(21);
+        this.pauseSub = this.add.text(WIDTH / 2, HEIGHT / 2 + 24, '按 P 或点击继续', {
+          fontFamily: '-apple-system, "PingFang SC", "Microsoft YaHei", sans-serif',
+          fontSize: '16px', color: '#dddddd'
+        }).setOrigin(0.5).setDepth(21);
+      }
+      this.pauseTitle.setAlpha(1);
+      this.pauseSub.setAlpha(1);
     }
 
     drawHint(gfx) {
@@ -1321,7 +1656,8 @@
     }
 
     destroyUITexts() {
-      const keys = ['speedMinusText', 'speedPlusText', 'speedLabel', 'hintText',
+      const keys = ['speedMinusText', 'speedPlusText', 'speedLabel',
+                      'pauseText', 'soundText', 'pauseTitle', 'pauseSub', 'hintText',
                       'startTitle', 'startInst1', 'startInst2', 'startBtnText',
                       'gameoverMsg', 'restartBtnText'];
       for (const key of keys) {

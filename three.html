@@ -52,14 +52,15 @@
     position: absolute; bottom: 12px; left: 0; right: 0; text-align: center;
     font-size: 14px; color: #999; pointer-events: none; z-index: 5; transition: opacity 0.3s;
   }
-  #speed-controls {
+  .top-controls {
     position: absolute; top: 8px; right: 8px; display: flex; align-items: center; gap: 4px; z-index: 15;
   }
-  #speed-controls button {
-    width: 28px; height: 28px; border: 1px solid rgba(255,255,255,0.3); border-radius: 4px;
+  #game-controls { left: 8px; right: auto; }
+  .top-controls button {
+    min-width: 28px; height: 28px; padding: 0 10px; border: 1px solid rgba(255,255,255,0.3); border-radius: 4px;
     background: rgba(0,0,0,0.4); color: #eee; font-size: 14px; font-weight: 700; cursor: pointer;
   }
-  #speed-controls button:hover { background: rgba(255,255,255,0.15); }
+  .top-controls button:hover { background: rgba(255,255,255,0.15); }
   #speed-label { font-size: 12px; color: #ccc; min-width: 36px; text-align: center; }
 </style>
 </head>
@@ -77,8 +78,17 @@
     <div class="sub" id="result-text" style="color:#eee;"></div>
     <button id="restart-btn">再来一局</button>
   </div>
+  <div id="pause-overlay" class="overlay hidden">
+    <h2 style="color:#fff;">已暂停</h2>
+    <div class="sub">按 P 或点击继续</div>
+    <button id="resume-btn">继续</button>
+  </div>
   <div id="hint"></div>
-  <div id="speed-controls">
+  <div id="game-controls" class="top-controls">
+    <button id="pause-toggle">暂停</button>
+    <button id="sound-toggle">声音 开</button>
+  </div>
+  <div id="speed-controls" class="top-controls">
     <button id="speed-down">−</button>
     <span id="speed-label">1.0x</span>
     <button id="speed-up">+</button>
@@ -89,7 +99,89 @@
 <script>
 (() => {
 
-// ==================== Constants ====================
+// ==================== Sound Engine ====================
+  const snd = (() => {
+    let ctx = null, lastBounce = 0, enabled = true;
+    function c() {
+      try { if (!ctx) ctx = new (window.AudioContext || window.webkitAudioContext)(); if (ctx.state === 'suspended') ctx.resume(); return ctx; } catch(e) { return null; }
+    }
+    function safe(fn) { if (!enabled) return; try { fn(); } catch(e) {} }
+    return {
+      init() { if (enabled) c(); },
+      isEnabled() { return enabled; },
+      setEnabled(value) { enabled = !!value; },
+      toggle() { enabled = !enabled; return enabled; },
+      playStart() { safe(() => { const x = c(); if (!x) return; const t = x.currentTime;
+        [0,0.1,0.2].forEach((d,i) => { const o = x.createOscillator(), g = x.createGain(); o.type = 'sine';
+        o.frequency.setValueAtTime([523,659,784][i], t + d);
+        g.gain.setValueAtTime(0.1, t + d); g.gain.linearRampToValueAtTime(0, t + d + 0.15);
+        o.connect(g); g.connect(x.destination); o.start(t + d); o.stop(t + d + 0.2); });
+      }); },
+      playWin() { safe(() => { const x = c(); if (!x) return; const t = x.currentTime;
+        [0,0.15,0.3].forEach((d,i) => { const o = x.createOscillator(), g = x.createGain(); o.type = 'sine';
+        o.frequency.setValueAtTime([523,659,784][i], t + d);
+        g.gain.setValueAtTime(0.15, t + d); g.gain.linearRampToValueAtTime(0, t + d + 0.35);
+        o.connect(g); g.connect(x.destination); o.start(t + d); o.stop(t + d + 0.4); });
+      }); },
+      playLose() { safe(() => { const x = c(); if (!x) return; const t = x.currentTime;
+        [0,0.2].forEach((d,i) => { const o = x.createOscillator(), g = x.createGain(); o.type = 'sine';
+        o.frequency.setValueAtTime([400,200][i], t + d);
+        o.frequency.linearRampToValueAtTime([200,100][i], t + d + 0.35);
+        g.gain.setValueAtTime(0.12, t + d); g.gain.linearRampToValueAtTime(0, t + d + 0.35);
+        o.connect(g); g.connect(x.destination); o.start(t + d); o.stop(t + d + 0.4); });
+      }); },
+      playThrow() { safe(() => { const x = c(); if (!x) return; const t = x.currentTime;
+        const o = x.createOscillator(), g = x.createGain(); o.type = 'sine';
+        o.frequency.setValueAtTime(200, t); o.frequency.linearRampToValueAtTime(600, t + 0.15);
+        g.gain.setValueAtTime(0.12, t); g.gain.linearRampToValueAtTime(0, t + 0.15);
+        o.connect(g); g.connect(x.destination); o.start(t); o.stop(t + 0.17);
+      }); },
+      playHit() { safe(() => { const x = c(); if (!x) return; const t = x.currentTime;
+        const o = x.createOscillator(), g = x.createGain(); o.type = 'sine';
+        o.frequency.setValueAtTime(100, t); g.gain.setValueAtTime(0.18, t);
+        g.gain.linearRampToValueAtTime(0, t + 0.2); o.connect(g); g.connect(x.destination);
+        o.start(t); o.stop(t + 0.22);
+        if (x.sampleRate) { const len = Math.ceil(x.sampleRate * 0.15);
+        const buf = x.createBuffer(1, len, x.sampleRate);
+        for (let i = 0; i < len; i++) buf.getChannelData(0)[i] = Math.random() * 2 - 1;
+        const s = x.createBufferSource(); s.buffer = buf;
+        const gn = x.createGain(), f = x.createBiquadFilter(); f.type = 'bandpass';
+        f.frequency.setValueAtTime(300, t); f.Q.setValueAtTime(1, t);
+        gn.gain.setValueAtTime(0.1, t); gn.gain.linearRampToValueAtTime(0, t + 0.15);
+        s.connect(f); f.connect(gn); gn.connect(x.destination); s.start(t); s.stop(t + 0.17); }
+      }); },
+      playDeath() { safe(() => { const x = c(); if (!x) return; const t = x.currentTime;
+        const o = x.createOscillator(), g = x.createGain(); o.type = 'sine';
+        o.frequency.setValueAtTime(400, t); o.frequency.linearRampToValueAtTime(80, t + 0.5);
+        g.gain.setValueAtTime(0.15, t); g.gain.linearRampToValueAtTime(0, t + 0.5);
+        o.connect(g); g.connect(x.destination); o.start(t); o.stop(t + 0.52);
+        if (x.sampleRate) { const len = Math.ceil(x.sampleRate * 0.3);
+        const buf = x.createBuffer(1, len, x.sampleRate);
+        for (let i = 0; i < len; i++) buf.getChannelData(0)[i] = Math.random() * 2 - 1;
+        const s = x.createBufferSource(); s.buffer = buf;
+        const gn = x.createGain(), f = x.createBiquadFilter(); f.type = 'bandpass';
+        f.frequency.setValueAtTime(200, t); f.Q.setValueAtTime(0.5, t);
+        gn.gain.setValueAtTime(0.12, t); gn.gain.linearRampToValueAtTime(0, t + 0.3);
+        s.connect(f); f.connect(gn); gn.connect(x.destination); s.start(t); s.stop(t + 0.32); }
+      }); },
+      playBounce() { if (Date.now() - lastBounce < 50) return; lastBounce = Date.now();
+        safe(() => { const x = c(); if (!x) return; const t = x.currentTime;
+        const o = x.createOscillator(), g = x.createGain(); o.type = 'sine';
+        o.frequency.setValueAtTime(800, t); g.gain.setValueAtTime(0.06, t);
+        g.gain.linearRampToValueAtTime(0, t + 0.08); o.connect(g); g.connect(x.destination);
+        o.start(t); o.stop(t + 0.1); });
+      },
+      playObsBounce() { if (Date.now() - lastBounce < 50) return; lastBounce = Date.now();
+        safe(() => { const x = c(); if (!x) return; const t = x.currentTime;
+        const o = x.createOscillator(), g = x.createGain(); o.type = 'sine';
+        o.frequency.setValueAtTime(600, t); g.gain.setValueAtTime(0.04, t);
+        g.gain.linearRampToValueAtTime(0, t + 0.06); o.connect(g); g.connect(x.destination);
+        o.start(t); o.stop(t + 0.08); });
+      },
+    };
+  })();
+
+  // ==================== Constants ====================
 const W = 800, H = 500, HW = 400, HH = 250;
 const CHAR_RADIUS = 15, CHAR_SPEED = 4;
 const BALL_RADIUS = 6;
@@ -123,9 +215,13 @@ function cY(tz) { return tz + HH; }
 const canvas = document.getElementById('game-canvas');
 const startOverlay = document.getElementById('start-overlay');
 const gameoverOverlay = document.getElementById('gameover-overlay');
+const pauseOverlay = document.getElementById('pause-overlay');
 const resultText = document.getElementById('result-text');
 const startBtn = document.getElementById('start-btn');
 const restartBtn = document.getElementById('restart-btn');
+const resumeBtn = document.getElementById('resume-btn');
+const pauseToggle = document.getElementById('pause-toggle');
+const soundToggle = document.getElementById('sound-toggle');
 const hintEl = document.getElementById('hint');
 const sDown = document.getElementById('speed-down');
 const sUp = document.getElementById('speed-up');
@@ -297,6 +393,7 @@ function createBall(thrower, dx, dz, speed) {
     if (wallBodies.includes(e.body)) {
       ball.bouncesLeft--;
       ball.squashTimer = 0.1;
+      snd.playBounce();
       if (ball.bouncesLeft <= 0) ball.shouldRemove = true;
     }
   }
@@ -313,6 +410,7 @@ function createBall(thrower, dx, dz, speed) {
   ball._charFn = onChar;
 
   game.balls.push(ball);
+  snd.playThrow();
   return ball;
 }
 
@@ -320,6 +418,7 @@ function createBall(thrower, dx, dz, speed) {
 function onHit(ball, ch) {
   if (ball.shouldRemove || ball.ownerTeam === ch.team || ch.hp <= 0 || ch.dyingTimer > 0) return;
   ch.hp--;
+  snd.playHit();
   ch.hitFlash = 0.2;
   setHP(ch);
   spawnHit(ch.phys.position.x, ch.phys.position.z, C_STR[ch.role]);
@@ -329,7 +428,7 @@ function onHit(ball, ch) {
     r[ch.role].hits++;
   }
   ball.shouldRemove = true;
-  if (ch.hp <= 0) { ch.dyingTimer = 0.5; spawnDeath(ch); }
+  if (ch.hp <= 0) { snd.playDeath(); ch.dyingTimer = 0.5; spawnDeath(ch); }
   if (allDead(teamA())) endGame('player');
   else if (allDead(teamP())) endGame('ai');
 }
@@ -656,6 +755,13 @@ const gPlane = new THREE.Plane(new THREE.Vector3(0, 1, 0), 0);
 window.addEventListener('keydown', e => {
   keys[e.code] = true;
   if (['ArrowUp','ArrowDown','ArrowLeft','ArrowRight','Space'].includes(e.code)) e.preventDefault();
+  if (e.code === 'KeyP' && (game.state === 'playing' || game.state === 'paused')) {
+    e.preventDefault();
+    togglePause();
+  } else if (e.code === 'KeyM') {
+    e.preventDefault();
+    toggleSound();
+  }
 });
 window.addEventListener('keyup', e => { keys[e.code] = false; });
 canvas.addEventListener('mousemove', e => {
@@ -673,22 +779,52 @@ canvas.addEventListener('click', () => {
 });
 
 // ==================== Buttons ====================
-startBtn.addEventListener('click', () => startGame());
+startBtn.addEventListener('click', () => { snd.init(); startGame(); });
 restartBtn.addEventListener('click', () => resetGame());
+resumeBtn.addEventListener('click', () => togglePause());
+pauseToggle.addEventListener('click', () => togglePause());
+soundToggle.addEventListener('click', () => toggleSound());
 sDown.addEventListener('click', () => { game.ballMul = Math.max(0.5, game.ballMul - 0.5); sLabel.textContent = game.ballMul.toFixed(1) + 'x'; });
 sUp.addEventListener('click', () => { game.ballMul = Math.min(3.0, game.ballMul + 0.5); sLabel.textContent = game.ballMul.toFixed(1) + 'x'; });
 
 // ==================== Game flow ====================
+function updateControlLabels() {
+  pauseToggle.textContent = game.state === 'paused' ? '继续' : '暂停';
+  soundToggle.textContent = snd.isEnabled() ? '声音 开' : '声音 关';
+}
+
+function togglePause() {
+  if (game.state === 'playing') {
+    game.state = 'paused';
+    pauseOverlay.classList.remove('hidden');
+  } else if (game.state === 'paused') {
+    game.state = 'playing';
+    game.hintTimer = HINT_FRAMES;
+    pauseOverlay.classList.add('hidden');
+  }
+  updateControlLabels();
+}
+
+function toggleSound() {
+  snd.toggle();
+  updateControlLabels();
+}
+
 function startGame() {
+  snd.playStart();
   game.state = 'playing'; game.hintTimer = HINT_FRAMES;
-  startOverlay.classList.add('hidden'); gameoverOverlay.classList.add('hidden');
+  startOverlay.classList.add('hidden'); gameoverOverlay.classList.add('hidden'); pauseOverlay.classList.add('hidden');
   hintEl.style.opacity = '1';
+  updateControlLabels();
 }
 
 function endGame(w) {
+  if (w === 'player') snd.playWin(); else snd.playLose();
   game.state = 'gameover'; game.winner = w;
   resultText.textContent = w === 'player' ? '蓝方胜利！' : '红方胜利！';
+  pauseOverlay.classList.add('hidden');
   gameoverOverlay.classList.remove('hidden');
+  updateControlLabels();
 }
 
 function resetGame() {
@@ -727,7 +863,9 @@ function resetGame() {
   game.hintTimer = HINT_FRAMES; game.shakeTimer = 0;
   hintEl.style.opacity = '1';
   gameoverOverlay.classList.add('hidden');
+  pauseOverlay.classList.add('hidden');
   startOverlay.classList.remove('hidden');
+  updateControlLabels();
 }
 
 // ==================== Sync + Loop ====================
@@ -829,6 +967,7 @@ function updBallBounces() {
         minD = BALL_RADIUS + o.hw;
       }
       if (dist < minD) {
+        snd.playObsBounce();
         if (dist > 0.001) {
           const over = minD - dist;
           b.phys.position.x += (dx / dist) * over;

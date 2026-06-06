@@ -39,6 +39,88 @@
 (() => {
   'use strict';
 
+  // ---------- Sound Engine ----------
+  const snd = (() => {
+    let ctx = null, lastBounce = 0, enabled = true;
+    function c() {
+      try { if (!ctx) ctx = new (window.AudioContext || window.webkitAudioContext)(); if (ctx.state === 'suspended') ctx.resume(); return ctx; } catch(e) { return null; }
+    }
+    function safe(fn) { if (!enabled) return; try { fn(); } catch(e) {} }
+    return {
+      init() { if (enabled) c(); },
+      isEnabled() { return enabled; },
+      setEnabled(value) { enabled = !!value; },
+      toggle() { enabled = !enabled; return enabled; },
+      playStart() { safe(() => { const x = c(); if (!x) return; const t = x.currentTime;
+        [0,0.1,0.2].forEach((d,i) => { const o = x.createOscillator(), g = x.createGain(); o.type = 'sine';
+        o.frequency.setValueAtTime([523,659,784][i], t + d);
+        g.gain.setValueAtTime(0.1, t + d); g.gain.linearRampToValueAtTime(0, t + d + 0.15);
+        o.connect(g); g.connect(x.destination); o.start(t + d); o.stop(t + d + 0.2); });
+      }); },
+      playWin() { safe(() => { const x = c(); if (!x) return; const t = x.currentTime;
+        [0,0.15,0.3].forEach((d,i) => { const o = x.createOscillator(), g = x.createGain(); o.type = 'sine';
+        o.frequency.setValueAtTime([523,659,784][i], t + d);
+        g.gain.setValueAtTime(0.15, t + d); g.gain.linearRampToValueAtTime(0, t + d + 0.35);
+        o.connect(g); g.connect(x.destination); o.start(t + d); o.stop(t + d + 0.4); });
+      }); },
+      playLose() { safe(() => { const x = c(); if (!x) return; const t = x.currentTime;
+        [0,0.2].forEach((d,i) => { const o = x.createOscillator(), g = x.createGain(); o.type = 'sine';
+        o.frequency.setValueAtTime([400,200][i], t + d);
+        o.frequency.linearRampToValueAtTime([200,100][i], t + d + 0.35);
+        g.gain.setValueAtTime(0.12, t + d); g.gain.linearRampToValueAtTime(0, t + d + 0.35);
+        o.connect(g); g.connect(x.destination); o.start(t + d); o.stop(t + d + 0.4); });
+      }); },
+      playThrow() { safe(() => { const x = c(); if (!x) return; const t = x.currentTime;
+        const o = x.createOscillator(), g = x.createGain(); o.type = 'sine';
+        o.frequency.setValueAtTime(200, t); o.frequency.linearRampToValueAtTime(600, t + 0.15);
+        g.gain.setValueAtTime(0.12, t); g.gain.linearRampToValueAtTime(0, t + 0.15);
+        o.connect(g); g.connect(x.destination); o.start(t); o.stop(t + 0.17);
+      }); },
+      playHit() { safe(() => { const x = c(); if (!x) return; const t = x.currentTime;
+        const o = x.createOscillator(), g = x.createGain(); o.type = 'sine';
+        o.frequency.setValueAtTime(100, t); g.gain.setValueAtTime(0.18, t);
+        g.gain.linearRampToValueAtTime(0, t + 0.2); o.connect(g); g.connect(x.destination);
+        o.start(t); o.stop(t + 0.22);
+        if (x.sampleRate) { const len = Math.ceil(x.sampleRate * 0.15);
+        const buf = x.createBuffer(1, len, x.sampleRate);
+        for (let i = 0; i < len; i++) buf.getChannelData(0)[i] = Math.random() * 2 - 1;
+        const s = x.createBufferSource(); s.buffer = buf;
+        const gn = x.createGain(), f = x.createBiquadFilter(); f.type = 'bandpass';
+        f.frequency.setValueAtTime(300, t); f.Q.setValueAtTime(1, t);
+        gn.gain.setValueAtTime(0.1, t); gn.gain.linearRampToValueAtTime(0, t + 0.15);
+        s.connect(f); f.connect(gn); gn.connect(x.destination); s.start(t); s.stop(t + 0.17); }
+      }); },
+      playDeath() { safe(() => { const x = c(); if (!x) return; const t = x.currentTime;
+        const o = x.createOscillator(), g = x.createGain(); o.type = 'sine';
+        o.frequency.setValueAtTime(400, t); o.frequency.linearRampToValueAtTime(80, t + 0.5);
+        g.gain.setValueAtTime(0.15, t); g.gain.linearRampToValueAtTime(0, t + 0.5);
+        o.connect(g); g.connect(x.destination); o.start(t); o.stop(t + 0.52);
+        if (x.sampleRate) { const len = Math.ceil(x.sampleRate * 0.3);
+        const buf = x.createBuffer(1, len, x.sampleRate);
+        for (let i = 0; i < len; i++) buf.getChannelData(0)[i] = Math.random() * 2 - 1;
+        const s = x.createBufferSource(); s.buffer = buf;
+        const gn = x.createGain(), f = x.createBiquadFilter(); f.type = 'bandpass';
+        f.frequency.setValueAtTime(200, t); f.Q.setValueAtTime(0.5, t);
+        gn.gain.setValueAtTime(0.12, t); gn.gain.linearRampToValueAtTime(0, t + 0.3);
+        s.connect(f); f.connect(gn); gn.connect(x.destination); s.start(t); s.stop(t + 0.32); }
+      }); },
+      playBounce() { if (Date.now() - lastBounce < 50) return; lastBounce = Date.now();
+        safe(() => { const x = c(); if (!x) return; const t = x.currentTime;
+        const o = x.createOscillator(), g = x.createGain(); o.type = 'sine';
+        o.frequency.setValueAtTime(800, t); g.gain.setValueAtTime(0.06, t);
+        g.gain.linearRampToValueAtTime(0, t + 0.08); o.connect(g); g.connect(x.destination);
+        o.start(t); o.stop(t + 0.1); });
+      },
+      playObsBounce() { if (Date.now() - lastBounce < 50) return; lastBounce = Date.now();
+        safe(() => { const x = c(); if (!x) return; const t = x.currentTime;
+        const o = x.createOscillator(), g = x.createGain(); o.type = 'sine';
+        o.frequency.setValueAtTime(600, t); g.gain.setValueAtTime(0.04, t);
+        g.gain.linearRampToValueAtTime(0, t + 0.06); o.connect(g); g.connect(x.destination);
+        o.start(t); o.stop(t + 0.08); });
+      },
+    };
+  })();
+
   // ---------- Constants ----------
   const WIDTH = 800;
   const HEIGHT = 500;
@@ -95,11 +177,13 @@
 
   // ---------- Game state ----------
   const state = {
-    gameState: 'ready',     // 'ready' | 'playing' | 'gameover'
+    gameState: 'ready',     // 'ready' | 'playing' | 'paused' | 'gameover'
     winner: null,           // 'player' | 'ai'
     hintTimer: HINT_FRAMES,
     restartBtn: null,       // {x, y, w, h} computed in render
     startBtn: null,         // start button bounds in 'ready' state
+    pauseBtn: null,         // pause/resume button bounds
+    soundBtn: null,         // sound toggle button bounds
     ballSpeedMultiplier: 1.0, // 0.5x to 2.0x
     speedDownBtn: null,     // slow button bounds
     speedUpBtn: null,       // fast button bounds
@@ -219,8 +303,23 @@
   }
 
   function startGame() {
+    snd.playStart();
     state.gameState = 'playing';
     state.hintTimer = HINT_FRAMES;
+  }
+
+  function togglePause() {
+    if (state.gameState === 'playing') {
+      state.gameState = 'paused';
+      mouse.isDown = false;
+    } else if (state.gameState === 'paused') {
+      state.gameState = 'playing';
+      state.hintTimer = HINT_FRAMES;
+    }
+  }
+
+  function toggleSound() {
+    snd.toggle();
   }
 
   // ---------- Input ----------
@@ -233,8 +332,21 @@
     if (['ArrowUp','ArrowDown','ArrowLeft','ArrowRight','Space'].includes(e.code)) {
       e.preventDefault();
     }
+    if (e.code === 'KeyM') {
+      e.preventDefault();
+      toggleSound();
+      return;
+    }
+    if (e.code === 'KeyP') {
+      if (state.gameState === 'playing' || state.gameState === 'paused') {
+        e.preventDefault();
+        togglePause();
+        return;
+      }
+    }
     // Any key starts the game from 'ready' state
     if (state.gameState === 'ready') {
+      snd.init();
       startGame();
     }
   });
@@ -261,6 +373,18 @@
     mouse.y = p.y;
     mouse.isDown = true;
 
+    // Global controls first
+    if (state.pauseBtn && p.x >= state.pauseBtn.x && p.x <= state.pauseBtn.x + state.pauseBtn.w &&
+        p.y >= state.pauseBtn.y && p.y <= state.pauseBtn.y + state.pauseBtn.h) {
+      togglePause();
+      return;
+    }
+    if (state.soundBtn && p.x >= state.soundBtn.x && p.x <= state.soundBtn.x + state.soundBtn.w &&
+        p.y >= state.soundBtn.y && p.y <= state.soundBtn.y + state.soundBtn.h) {
+      toggleSound();
+      return;
+    }
+
     // Speed control buttons first
     if (state.speedDownBtn && p.x >= state.speedDownBtn.x && p.x <= state.speedDownBtn.x + state.speedDownBtn.w &&
         p.y >= state.speedDownBtn.y && p.y <= state.speedDownBtn.y + state.speedDownBtn.h) {
@@ -274,6 +398,7 @@
     }
 
     if (state.gameState === 'ready') {
+      snd.init();
       startGame();
     } else if (state.gameState === 'playing') {
       // P1 throws toward mouse cursor (if P1 is alive)
@@ -304,6 +429,7 @@
     const bx = thrower.x + ndx * spawnDist;
     const by = thrower.y + ndy * spawnDist;
     balls.push(createBall(bx, by, ndx * speed * state.ballSpeedMultiplier, ndy * speed * state.ballSpeedMultiplier, thrower));
+    snd.playThrow();
     thrower.throwCooldown = PLAYER_THROW_COOLDOWN;
     thrower.facingAngle = Math.atan2(ndy, ndx);
   }
@@ -699,24 +825,30 @@
       b.y += b.vy;
 
       // Wall bounce
+      let wallBounced = false;
       if (b.x - b.radius < 0) {
         b.x = b.radius;
         b.vx = -b.vx;
         b.bouncesLeft--;
+        wallBounced = true;
       } else if (b.x + b.radius > WIDTH) {
         b.x = WIDTH - b.radius;
         b.vx = -b.vx;
         b.bouncesLeft--;
+        wallBounced = true;
       }
       if (b.y - b.radius < 0) {
         b.y = b.radius;
         b.vy = -b.vy;
         b.bouncesLeft--;
+        wallBounced = true;
       } else if (b.y + b.radius > HEIGHT) {
         b.y = HEIGHT - b.radius;
         b.vy = -b.vy;
         b.bouncesLeft--;
+        wallBounced = true;
       }
+      if (wallBounced) snd.playBounce();
 
       // Obstacle bounce
       for (const o of obstacles) {
@@ -741,6 +873,7 @@
           minD = b.radius + or;
         }
         if (dist < minD) {
+          snd.playObsBounce();
           // Push ball out of obstacle
           if (dist > 0.001) {
             const overlap = minD - dist;
@@ -792,6 +925,7 @@
         if (target.hp <= 0 || target.dyingTimer > 0) continue;
         if (circleHitsCharacter(b, target)) {
           target.hp = Math.max(0, target.hp - 1);
+          snd.playHit();
           // Hit effect — flash ring + particle burst
           spawnHitEffect(target.x, target.y, target.color);
           // Record successful hit for thrower's adaptive jitter
@@ -801,6 +935,7 @@
           balls.splice(i, 1);
           // Death animation
           if (target.hp <= 0 && target.dyingTimer === 0) {
+            snd.playDeath();
             target.dyingTimer = 30; // 30-frame death animation
             // Generate particles
             for (let p = 0; p < 12; p++) {
@@ -827,6 +962,7 @@
   }
 
   function endGame(winner) {
+    if (winner === 'player') snd.playWin(); else snd.playLose();
     state.gameState = 'gameover';
     state.winner = winner;
   }
@@ -1244,6 +1380,57 @@
     ctx.fillText('点击开始', WIDTH / 2, by + bh / 2);
   }
 
+  function drawPauseOverlay() {
+    ctx.fillStyle = 'rgba(0,0,0,0.45)';
+    ctx.fillRect(0, 0, WIDTH, HEIGHT);
+
+    ctx.fillStyle = '#fff';
+    ctx.font = 'bold 42px -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText('已暂停', WIDTH / 2, HEIGHT / 2 - 20);
+
+    ctx.font = '16px -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif';
+    ctx.fillStyle = '#ddd';
+    ctx.fillText('按 P 或点击继续', WIDTH / 2, HEIGHT / 2 + 24);
+  }
+
+  function drawSmallButton(bounds, label, fillStyle) {
+    ctx.fillStyle = fillStyle;
+    roundRect(ctx, bounds.x, bounds.y, bounds.w, bounds.h, 6);
+    ctx.fill();
+    ctx.fillStyle = '#fff';
+    ctx.font = 'bold 14px -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText(label, bounds.x + bounds.w / 2, bounds.y + bounds.h / 2);
+  }
+
+  function drawTopControls() {
+    const btnH = 32, gap = 8, btnY = 12;
+    state.pauseBtn = { x: 12, y: btnY, w: 64, h: btnH };
+    state.soundBtn = { x: state.pauseBtn.x + state.pauseBtn.w + gap, y: btnY, w: 78, h: btnH };
+
+    const pauseLabel = state.gameState === 'paused' ? '继续' : '暂停';
+    drawSmallButton(state.pauseBtn, pauseLabel, state.gameState === 'ready' || state.gameState === 'gameover' ? '#718096' : '#4a5568');
+    drawSmallButton(state.soundBtn, snd.isEnabled() ? '声音 开' : '声音 关', snd.isEnabled() ? '#2f855a' : '#805ad5');
+
+    const btnW = 40, btnStartX = WIDTH - 200;
+    const spdLabelX = btnStartX + 2*btnW + gap*2 + 30;
+    const btn1X = btnStartX, btn2X = btnStartX + btnW + gap;
+    state.speedDownBtn = {x: btn1X, y: btnY, w: btnW, h: btnH};
+    state.speedUpBtn = {x: btn2X, y: btnY, w: btnW, h: btnH};
+
+    drawSmallButton(state.speedDownBtn, '-', '#4a5568');
+    drawSmallButton(state.speedUpBtn, '+', '#4a5568');
+
+    ctx.fillStyle = '#333';
+    ctx.font = 'bold 14px -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif';
+    ctx.textAlign = 'left';
+    ctx.textBaseline = 'middle';
+    ctx.fillText('球速: ' + (state.ballSpeedMultiplier * 100) + '%', spdLabelX, state.speedDownBtn.y + state.speedDownBtn.h/2);
+  }
+
   function render() {
     // Clear
     ctx.fillStyle = COLOR_BG;
@@ -1257,31 +1444,11 @@
     drawBalls();
     drawEffects();
 
-    // UI: speed control
-    const btnW = 40, btnH = 32, gap = 8, btnY = 12, btnStartX = WIDTH - 200;
-    const spdLabelX = btnStartX + 2*btnW + gap*2 + 30;
-    const btn1X = btnStartX, btn2X = btnStartX + btnW + gap;
-    state.speedDownBtn = {x: btn1X, y: btnY, w: btnW, h: btnH};
-    state.speedUpBtn = {x: btn2X, y: btnY, w: btnW, h: btnH};
-    ctx.fillStyle = '#4a5568';
-    roundRect(ctx, state.speedDownBtn.x, state.speedDownBtn.y, state.speedDownBtn.w, state.speedDownBtn.h, 6);
-    ctx.fill();
-    roundRect(ctx, state.speedUpBtn.x, state.speedUpBtn.y, state.speedUpBtn.w, state.speedUpBtn.h, 6);
-    ctx.fill();
-    ctx.fillStyle = '#fff';
-    ctx.font = 'bold 22px -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif';
-    ctx.textBaseline = 'middle';
-    ctx.textAlign = 'center';
-    ctx.fillText('-', state.speedDownBtn.x + state.speedDownBtn.w/2, state.speedDownBtn.y + state.speedDownBtn.h/2);
-    ctx.fillText('+', state.speedUpBtn.x + state.speedUpBtn.w/2, state.speedUpBtn.y + state.speedUpBtn.h/2);
-    ctx.fillStyle = '#333';
-    ctx.font = 'bold 14px -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif';
-    ctx.textAlign = 'left';
-    ctx.fillText('球速: ' + (state.ballSpeedMultiplier * 100) + '%', spdLabelX, state.speedDownBtn.y + state.speedDownBtn.h/2);
-
     drawHint();
     if (state.gameState === 'ready') drawStartScreen();
+    else if (state.gameState === 'paused') drawPauseOverlay();
     else if (state.gameState === 'gameover') drawGameOver();
+    drawTopControls();
   }
 
   // ---------- Main loop ----------
