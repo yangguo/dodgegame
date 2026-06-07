@@ -156,6 +156,9 @@
   const JITTER_MIN = 2;                 // minimum aim jitter (very accurate)
   const JITTER_MAX = 12;                // maximum aim jitter (very inaccurate)
   const JITTER_ADAPT_THRESHOLD = 0.6;   // hit rate below this = increase jitter
+  const HP_SPAWN_INTERVAL = 900;         // 15 seconds at 60fps
+  const HP_DURATION = 300;               // 5 seconds at 60fps
+  const HP_PACK_RADIUS = 14;             // visual size
 
   const COLOR_P1 = '#4A90E2';           // blue
   const COLOR_P2 = '#3DC1B5';           // teal
@@ -188,6 +191,8 @@
     speedDownBtn: null,     // slow button bounds
     speedUpBtn: null,       // fast button bounds
     effects: [],            // hit effects (ring + particles)
+    healthPack: null,       // { x, y, life } or null
+    healthPackTimer: HP_SPAWN_INTERVAL, // frames until next spawn
   };
 
   function createCharacter(x, y, color, team, role) {
@@ -295,6 +300,8 @@
     balls = [];
     obstacles = generateObstacles();
     state.effects = [];
+    state.healthPack = null;
+    state.healthPackTimer = HP_SPAWN_INTERVAL;
     p1History.length = 0;
     p2History.length = 0;
     state.gameState = 'ready';
@@ -1067,6 +1074,35 @@
       updateBalls();
       checkCollisions();
       updateEffects();
+      // Health pack spawning + pickup
+      state.healthPackTimer--;
+      if (!state.healthPack && state.healthPackTimer <= 0) {
+        // Spawn health pack at random position away from edges
+        const margin = 50;
+        const hpx = margin + Math.random() * (WIDTH - 2 * margin);
+        const hpy = margin + Math.random() * (HEIGHT - 2 * margin);
+        state.healthPack = { x: hpx, y: hpy, life: HP_DURATION };
+        state.healthPackTimer = HP_SPAWN_INTERVAL;
+      }
+      if (state.healthPack) {
+        state.healthPack.life--;
+        // Remove if expired
+        if (state.healthPack.life <= 0) {
+          state.healthPack = null;
+        } else {
+          // Check pickup by any alive character
+          const hp = state.healthPack;
+          for (const c of [...teamPlayer, ...teamAI]) {
+            if (c.hp <= 0 || c.dyingTimer > 0) continue;
+            const d = Math.hypot(c.x - hp.x, c.y - hp.y);
+            if (d < c.size / 2 + HP_PACK_RADIUS) {
+              c.hp = c.maxHp;
+              state.healthPack = null;
+              break;
+            }
+          }
+        }
+      }
       // Update death animations for all characters
       for (const c of [...teamPlayer, ...teamAI]) {
         if (c.dyingTimer > 0) {
@@ -1311,6 +1347,44 @@
     }
   }
 
+  function drawHealthPack(hp) {
+    const t = hp.life / HP_DURATION; // 1.0 → 0.0
+    const fade = t < 0.3 ? t / 0.3 : 1; // fade out in last 30%
+    const pulse = 1 + Math.sin(Date.now() / 200) * 0.15; // gentle pulse
+    const r = HP_PACK_RADIUS * pulse;
+
+    ctx.save();
+    ctx.globalAlpha = fade;
+
+    // Outer glow
+    const glow = ctx.createRadialGradient(hp.x, hp.y, r * 0.3, hp.x, hp.y, r * 1.6);
+    glow.addColorStop(0, 'rgba(255,64,64,0.6)');
+    glow.addColorStop(0.5, 'rgba(255,64,64,0.2)');
+    glow.addColorStop(1, 'rgba(255,64,64,0)');
+    ctx.fillStyle = glow;
+    ctx.beginPath();
+    ctx.arc(hp.x, hp.y, r * 1.6, 0, Math.PI * 2);
+    ctx.fill();
+
+    // White circle base
+    ctx.fillStyle = '#ffffff';
+    ctx.beginPath();
+    ctx.arc(hp.x, hp.y, r, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.strokeStyle = '#cc0000';
+    ctx.lineWidth = 2.5;
+    ctx.stroke();
+
+    // Red cross
+    const crossW = r * 0.4;
+    const crossH = r * 0.85;
+    ctx.fillStyle = '#e03030';
+    ctx.fillRect(hp.x - crossW, hp.y - crossH, crossW * 2, crossH * 2);
+    ctx.fillRect(hp.x - crossH, hp.y - crossW, crossH * 2, crossW * 2);
+
+    ctx.restore();
+  }
+
   function drawHint() {
     if (state.hintTimer <= 0) return;
     const alpha = Math.min(1, state.hintTimer / 60);
@@ -1439,6 +1513,7 @@
 
     // World
     drawObstacles();
+    if (state.healthPack) drawHealthPack(state.healthPack);
     for (const c of teamPlayer) drawCharacter(c);
     for (const c of teamAI) drawCharacter(c);
     drawBalls();
