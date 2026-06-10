@@ -118,6 +118,32 @@
         g.gain.linearRampToValueAtTime(0, t + 0.06); o.connect(g); g.connect(x.destination);
         o.start(t); o.stop(t + 0.08); });
       },
+      playLaserThrow() { safe(() => { const x = c(); if (!x) return; const t = x.currentTime;
+        const o = x.createOscillator(), g = x.createGain(); o.type = 'sawtooth';
+        o.frequency.setValueAtTime(1200, t); o.frequency.linearRampToValueAtTime(200, t + 0.2);
+        g.gain.setValueAtTime(0.12, t); g.gain.linearRampToValueAtTime(0, t + 0.22);
+        o.connect(g); g.connect(x.destination); o.start(t); o.stop(t + 0.24);
+      }); },
+      playLaserHit() { safe(() => { const x = c(); if (!x) return; const t = x.currentTime;
+        const o = x.createOscillator(), g = x.createGain(); o.type = 'square';
+        o.frequency.setValueAtTime(300, t); o.frequency.linearRampToValueAtTime(100, t + 0.15);
+        g.gain.setValueAtTime(0.2, t); g.gain.linearRampToValueAtTime(0, t + 0.18);
+        o.connect(g); g.connect(x.destination); o.start(t); o.stop(t + 0.2);
+        if (x.sampleRate) { const len = Math.ceil(x.sampleRate * 0.2);
+        const buf = x.createBuffer(1, len, x.sampleRate);
+        for (let i = 0; i < len; i++) buf.getChannelData(0)[i] = Math.random() * 2 - 1;
+        const s = x.createBufferSource(); s.buffer = buf;
+        const gn = x.createGain(), f = x.createBiquadFilter(); f.type = 'highpass';
+        f.frequency.setValueAtTime(800, t); f.Q.setValueAtTime(1, t);
+        gn.gain.setValueAtTime(0.15, t); gn.gain.linearRampToValueAtTime(0, t + 0.2);
+        s.connect(f); f.connect(gn); gn.connect(x.destination); s.start(t); s.stop(t + 0.22); }
+      }); },
+      playPowerUp() { safe(() => { const x = c(); if (!x) return; const t = x.currentTime;
+        [0,0.08,0.16].forEach((d,i) => { const o = x.createOscillator(), g = x.createGain(); o.type = 'sine';
+        o.frequency.setValueAtTime([600,900,1200][i], t + d);
+        g.gain.setValueAtTime(0.1, t + d); g.gain.linearRampToValueAtTime(0, t + d + 0.15);
+        o.connect(g); g.connect(x.destination); o.start(t + d); o.stop(t + d + 0.18); });
+      }); },
     };
   })();
 
@@ -159,6 +185,10 @@
   const HP_SPAWN_INTERVAL = 900;         // 15 seconds at 60fps
   const HP_DURATION = 300;               // 5 seconds at 60fps
   const HP_PACK_RADIUS = 14;             // visual size
+  const LASER_SPAWN_INTERVAL = 1200;      // 20 seconds at 60fps
+  const LASER_DURATION = 300;             // 5 seconds at 60fps
+  const LASER_PACK_RADIUS = 16;           // visual size
+  const LASER_BEAM_LIFE = 12;             // frames the beam visual persists
 
   const COLOR_P1 = '#4A90E2';           // blue
   const COLOR_P2 = '#3DC1B5';           // teal
@@ -193,6 +223,9 @@
     effects: [],            // hit effects (ring + particles)
     healthPack: null,       // { x, y, life } or null
     healthPackTimer: HP_SPAWN_INTERVAL, // frames until next spawn
+    laserPack: null,        // { x, y, life } or null
+    laserPackTimer: LASER_SPAWN_INTERVAL, // frames until next spawn
+    laserBeams: [],         // { x1,y1,x2,y2, owner, ownerTeam, life }
   };
 
   function createCharacter(x, y, color, team, role) {
@@ -217,6 +250,7 @@
       targetHitRates: {},           // { role: { hits, total } } for aim adaptation
       dyingTimer: 0,               // 0 = alive, >0 = death animation frames remaining
       deathParticles: [],          // particles for death animation
+      laserCharge: 0,              // 0 = no laser, 1 = has one laser charge
     };
   }
 
@@ -226,8 +260,6 @@
       radius: BALL_RADIUS,
       owner,               // character reference
       ownerTeam: owner.team,
-      // Use a brighter, more vivid shade than the character body so balls
-      // stand out visually and don't blend into the character that threw them.
       color: owner.team === 'player' ? '#1f6fcc' : '#ff1f1f',
       bouncesLeft: BALL_MAX_BOUNCES,
       trail: [],           // last few positions for visual trail
@@ -300,8 +332,11 @@
     balls = [];
     obstacles = generateObstacles();
     state.effects = [];
+    state.laserBeams = [];
     state.healthPack = null;
     state.healthPackTimer = HP_SPAWN_INTERVAL;
+    state.laserPack = null;
+    state.laserPackTimer = LASER_SPAWN_INTERVAL;
     p1History.length = 0;
     p2History.length = 0;
     state.gameState = 'ready';
@@ -430,15 +465,86 @@
     if (dist < 1) return;
     const ndx = dx / dist;
     const ndy = dy / dist;
-    const speed = thrower.team === 'player' ? PLAYER_BALL_SPEED : AI_BALL_SPEED;
-    // Spawn ball a bit further out so it doesn't immediately overlap characters
     const spawnDist = thrower.size / 2 + BALL_RADIUS + 4;
     const bx = thrower.x + ndx * spawnDist;
     const by = thrower.y + ndy * spawnDist;
+
+    // Check if thrower has laser charge — fire a beam instead of a ball
+    if (thrower.laserCharge > 0) {
+      thrower.laserCharge--;
+      fireLaserBeam(thrower, bx, by, ndx, ndy);
+      snd.playLaserThrow();
+      thrower.throwCooldown = PLAYER_THROW_COOLDOWN;
+      thrower.facingAngle = Math.atan2(ndy, ndx);
+      return;
+    }
+
+    const speed = thrower.team === 'player' ? PLAYER_BALL_SPEED : AI_BALL_SPEED;
     balls.push(createBall(bx, by, ndx * speed * state.ballSpeedMultiplier, ndy * speed * state.ballSpeedMultiplier, thrower));
     snd.playThrow();
     thrower.throwCooldown = PLAYER_THROW_COOLDOWN;
     thrower.facingAngle = Math.atan2(ndy, ndx);
+  }
+
+  function fireLaserBeam(thrower, startX, startY, ndx, ndy) {
+    // Cast a ray across the arena and hit the first enemy character
+    const targetTeam = thrower.team === 'player' ? teamAI : teamPlayer;
+    const alive = targetTeam.filter(c => c.hp > 0 && c.dyingTimer <= 0);
+
+    let bestT = Infinity;
+    let bestTarget = null;
+    // Ray-circle intersection against each enemy
+    for (const t of alive) {
+      const half = t.size / 2;
+      // Vector from ray origin to circle center
+      const ocx = startX - t.x;
+      const ocy = startY - t.y;
+      const b = 2 * (ndx * ocx + ndy * ocy);
+      const c = ocx * ocx + ocy * ocy - half * half;
+      let disc = b * b - 4 * c;
+      if (disc < 0) continue;
+      disc = Math.sqrt(disc);
+      const t1 = (-b - disc) / 2;
+      const t2 = (-b + disc) / 2;
+      const tHit = t1 > 0 ? t1 : t2;
+      if (tHit > 0 && tHit < bestT) {
+        bestT = tHit;
+        bestTarget = t;
+      }
+    }
+
+    if (bestTarget) {
+      bestTarget.hp = 0;
+      snd.playLaserHit();
+      spawnHitEffect(bestTarget.x, bestTarget.y, bestTarget.color);
+      if (bestTarget.dyingTimer === 0) {
+        snd.playDeath();
+        bestTarget.dyingTimer = 30;
+        for (let p = 0; p < 12; p++) {
+          const angle = Math.random() * Math.PI * 2;
+          const spd = 1 + Math.random() * 3;
+          bestTarget.deathParticles.push({
+            x: 0, y: 0,
+            vx: Math.cos(angle) * spd,
+            vy: Math.sin(angle) * spd,
+            life: 30,
+            size: 2 + Math.random() * 3,
+            color: '#' + Math.floor(Math.random()*16777215).toString(16).padStart(6,'0'),
+          });
+        }
+      }
+    }
+
+    // Beam visual: from start to hit point or max range
+    const endX = bestTarget ? startX + ndx * bestT : startX + ndx * 2000;
+    const endY = bestTarget ? startY + ndy * bestT : startY + ndy * 2000;
+    state.laserBeams.push({
+      x1: startX, y1: startY,
+      x2: endX, y2: endY,
+      owner: thrower,
+      ownerTeam: thrower.team,
+      life: LASER_BEAM_LIFE,
+    });
   }
 
   function nearestEnemy(character) {
@@ -675,7 +781,33 @@
       ai.aiState = 'AGGRESSIVE';
     }
 
-    // 2) Center bias — only used to keep AI from getting stuck against walls
+    // 2) Health pack seeking — prioritize if injured
+    let hpSeekX = 0, hpSeekY = 0;
+    if (state.healthPack && ai.hp < ai.maxHp) {
+      const hdx = state.healthPack.x - ai.x;
+      const hdy = state.healthPack.y - ai.y;
+      const hd = Math.hypot(hdx, hdy) || 1;
+      // Stronger pull when more injured and closer to pack
+      const hpNeed = (1 - ai.hp / ai.maxHp); // 0..1, higher when more hurt
+      const hpDistFactor = Math.min(1, 150 / (hd + 10)); // stronger when close
+      const hpForce = hpNeed * hpDistFactor * 1.2;
+      hpSeekX = (hdx / hd) * hpForce;
+      hpSeekY = (hdy / hd) * hpForce;
+    }
+
+    // 2b) Laser pack seeking — high priority for all AI (one-hit kill weapon)
+    let lzSeekX = 0, lzSeekY = 0;
+    if (state.laserPack && ai.laserCharge === 0) {
+      const ldx = state.laserPack.x - ai.x;
+      const ldy = state.laserPack.y - ai.y;
+      const ld = Math.hypot(ldx, ldy) || 1;
+      const lzDistFactor = Math.min(1, 200 / (ld + 10));
+      const lzForce = lzDistFactor * 1.0; // always high priority
+      lzSeekX = (ldx / ld) * lzForce;
+      lzSeekY = (ldy / ld) * lzForce;
+    }
+
+    // 3) Center bias — only used to keep AI from getting stuck against walls
     const margin = 60;
     let centerX = 0, centerY = 0;
     if (ai.x < margin) centerX = (margin - ai.x) / margin;
@@ -683,7 +815,7 @@
     if (ai.y < margin) centerY = (margin - ai.y) / margin;
     if (ai.y > HEIGHT - margin) centerY = -(ai.y - (HEIGHT - margin)) / margin;
 
-    // 3) Movement
+    // 4) Movement
     let mx = 0, my = 0;
     const dodgeGain = (ai.aiState === 'RETREAT') ? 1.6
                     : (ai.aiState === 'DEFENSIVE') ? 1.3
@@ -749,6 +881,14 @@
       }
     }
 
+    // 3c) Health pack seeking — blend in with other movement forces
+    mx += hpSeekX;
+    my += hpSeekY;
+
+    // 3d) Laser pack seeking — blend in with other movement forces
+    mx += lzSeekX;
+    my += lzSeekY;
+
     ai.x += mx * ai.speed;
     ai.y += my * ai.speed;
 
@@ -791,6 +931,8 @@
         const distFactor = 1 - Math.min(1, td / 500);
         let opportunity = distFactor * 0.3 + closingFactor * 0.5;
         if (target.hp <= 1) opportunity += 0.2;
+        // If AI has a laser charge, be more eager to use it (one-hit kill)
+        if (ai.laserCharge > 0) opportunity += 0.4;
 
         const threshold = ai.aiState === 'RETREAT' ? 0.7
                         : ai.aiState === 'AGGRESSIVE' ? 0.3
@@ -972,6 +1114,7 @@
     if (winner === 'player') snd.playWin(); else snd.playLose();
     state.gameState = 'gameover';
     state.winner = winner;
+    state.laserBeams = [];
   }
 
   // ---------- Hit effects ----------
@@ -1074,6 +1217,11 @@
       updateBalls();
       checkCollisions();
       updateEffects();
+      // Update laser beam visuals (fade out)
+      for (let i = state.laserBeams.length - 1; i >= 0; i--) {
+        state.laserBeams[i].life--;
+        if (state.laserBeams[i].life <= 0) state.laserBeams.splice(i, 1);
+      }
       // Health pack spawning + pickup
       state.healthPackTimer--;
       if (!state.healthPack && state.healthPackTimer <= 0) {
@@ -1098,6 +1246,33 @@
             if (d < c.size / 2 + HP_PACK_RADIUS) {
               c.hp = c.maxHp;
               state.healthPack = null;
+              break;
+            }
+          }
+        }
+      }
+      // Laser pack spawning + pickup (every 20 seconds)
+      state.laserPackTimer--;
+      if (!state.laserPack && state.laserPackTimer <= 0) {
+        const margin = 50;
+        const lpx = margin + Math.random() * (WIDTH - 2 * margin);
+        const lpy = margin + Math.random() * (HEIGHT - 2 * margin);
+        state.laserPack = { x: lpx, y: lpy, life: LASER_DURATION };
+        state.laserPackTimer = LASER_SPAWN_INTERVAL;
+      }
+      if (state.laserPack) {
+        state.laserPack.life--;
+        if (state.laserPack.life <= 0) {
+          state.laserPack = null;
+        } else {
+          const lp = state.laserPack;
+          for (const c of [...teamPlayer, ...teamAI]) {
+            if (c.hp <= 0 || c.dyingTimer > 0) continue;
+            const d = Math.hypot(c.x - lp.x, c.y - lp.y);
+            if (d < c.size / 2 + LASER_PACK_RADIUS) {
+              c.laserCharge = 1;
+              snd.playPowerUp();
+              state.laserPack = null;
               break;
             }
           }
@@ -1229,6 +1404,27 @@
 
     // HP bar
     drawHpBar(c);
+
+    // Laser charge indicator (golden dot above HP bar)
+    if (c.laserCharge > 0) {
+      const lx = c.x;
+      const ly = c.y - c.size / 2 - 20;
+      const lr = 4;
+      const lglow = ctx.createRadialGradient(lx, ly, lr * 0.3, lx, ly, lr * 2.2);
+      lglow.addColorStop(0, 'rgba(255,220,0,0.9)');
+      lglow.addColorStop(1, 'rgba(255,150,0,0)');
+      ctx.fillStyle = lglow;
+      ctx.beginPath();
+      ctx.arc(lx, ly, lr * 2.2, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.fillStyle = '#ffdd00';
+      ctx.beginPath();
+      ctx.arc(lx, ly, lr, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.strokeStyle = '#fff';
+      ctx.lineWidth = 1;
+      ctx.stroke();
+    }
   }
 
   function roundRect(ctx, x, y, w, h, r) {
@@ -1283,6 +1479,37 @@
       ctx.beginPath();
       ctx.arc(b.x - 4, b.y - 4, b.radius * 0.4, 0, Math.PI * 2);
       ctx.fill();
+    }
+  }
+
+  function drawLaserBeams() {
+    for (const lb of state.laserBeams) {
+      const alpha = lb.life / LASER_BEAM_LIFE;
+      // Outer glow — thick, semi-transparent gold
+      ctx.save();
+      ctx.globalAlpha = alpha * 0.3;
+      ctx.strokeStyle = '#ffcc00';
+      ctx.lineWidth = 12;
+      ctx.beginPath();
+      ctx.moveTo(lb.x1, lb.y1);
+      ctx.lineTo(lb.x2, lb.y2);
+      ctx.stroke();
+      // Mid glow
+      ctx.globalAlpha = alpha * 0.6;
+      ctx.strokeStyle = '#ffe066';
+      ctx.lineWidth = 6;
+      ctx.stroke();
+      // Core beam — bright white
+      ctx.globalAlpha = alpha * 0.95;
+      ctx.strokeStyle = '#ffffff';
+      ctx.lineWidth = 3;
+      ctx.stroke();
+      // Innermost electric line
+      ctx.globalAlpha = alpha;
+      ctx.strokeStyle = '#ffffcc';
+      ctx.lineWidth = 1;
+      ctx.stroke();
+      ctx.restore();
     }
   }
 
@@ -1385,6 +1612,57 @@
     ctx.restore();
   }
 
+  function drawLaserPack(lp) {
+    const t = lp.life / LASER_DURATION;
+    const fade = t < 0.3 ? t / 0.3 : 1;
+    const pulse = 1 + Math.sin(Date.now() / 150) * 0.2;
+    const r = LASER_PACK_RADIUS * pulse;
+
+    ctx.save();
+    ctx.globalAlpha = fade;
+
+    // Outer electric glow
+    const glow = ctx.createRadialGradient(lp.x, lp.y, r * 0.2, lp.x, lp.y, r * 2.0);
+    glow.addColorStop(0, 'rgba(255,200,0,0.7)');
+    glow.addColorStop(0.4, 'rgba(255,150,0,0.3)');
+    glow.addColorStop(1, 'rgba(255,100,0,0)');
+    ctx.fillStyle = glow;
+    ctx.beginPath();
+    ctx.arc(lp.x, lp.y, r * 2.0, 0, Math.PI * 2);
+    ctx.fill();
+
+    // Gold hexagon base
+    ctx.fillStyle = '#1a1a1a';
+    ctx.beginPath();
+    for (let i = 0; i < 6; i++) {
+      const angle = i * Math.PI / 3 - Math.PI / 6;
+      const vx = lp.x + Math.cos(angle) * r;
+      const vy = lp.y + Math.sin(angle) * r;
+      if (i === 0) ctx.moveTo(vx, vy);
+      else ctx.lineTo(vx, vy);
+    }
+    ctx.closePath();
+    ctx.fill();
+    ctx.strokeStyle = '#ffdd00';
+    ctx.lineWidth = 2.5;
+    ctx.stroke();
+
+    // Lightning bolt icon
+    const boltSize = r * 0.55;
+    ctx.fillStyle = '#ffdd00';
+    ctx.beginPath();
+    ctx.moveTo(lp.x + boltSize * 0.2, lp.y - boltSize);
+    ctx.lineTo(lp.x - boltSize * 0.4, lp.y + boltSize * 0.1);
+    ctx.lineTo(lp.x + boltSize * 0.1, lp.y + boltSize * 0.15);
+    ctx.lineTo(lp.x - boltSize * 0.2, lp.y + boltSize);
+    ctx.lineTo(lp.x + boltSize * 0.5, lp.y - boltSize * 0.1);
+    ctx.lineTo(lp.x - boltSize * 0.1, lp.y - boltSize * 0.15);
+    ctx.closePath();
+    ctx.fill();
+
+    ctx.restore();
+  }
+
   function drawHint() {
     if (state.hintTimer <= 0) return;
     const alpha = Math.min(1, state.hintTimer / 60);
@@ -1439,6 +1717,7 @@
     ctx.fillStyle = '#555';
     ctx.fillText('WASD 移动 · 鼠标点击 投球', WIDTH / 2, HEIGHT / 2 - 30);
     ctx.fillText('2v2 模式: 你 (蓝) + AI 队友 (青) vs 2 个敌方 AI (红/橙)', WIDTH / 2, HEIGHT / 2 - 5);
+    ctx.fillText('道具: 🩹血包  ⚡激光炮(秒杀)', WIDTH / 2, HEIGHT / 2 + 20);
 
     // Start button
     const bw = 180, bh = 48;
@@ -1514,9 +1793,11 @@
     // World
     drawObstacles();
     if (state.healthPack) drawHealthPack(state.healthPack);
+    if (state.laserPack) drawLaserPack(state.laserPack);
     for (const c of teamPlayer) drawCharacter(c);
     for (const c of teamAI) drawCharacter(c);
     drawBalls();
+    drawLaserBeams();
     drawEffects();
 
     drawHint();
